@@ -1,0 +1,36 @@
+{
+  "my_team": "All",
+  "video": "assets/1.mp4",
+  "output": "assets/1_annotated.mp4",
+  "calibration": {
+    "pitch_polygon": [
+      [
+        659,
+        1372
+      ],
+      [
+        2467,
+        1380
+      ],
+      [
+        3699,
+        1637
+      ],
+      [
+        142,
+        2093
+      ]
+    ],
+    "goals": [
+      [
+        543,
+        1523
+      ],
+      [
+        2892,
+        1465
+      ]
+    ]
+  },
+  "players": []
+}

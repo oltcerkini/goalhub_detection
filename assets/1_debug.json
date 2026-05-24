@@ -1,0 +1,61 @@
+{
+  "my_team": "All",
+  "players": [
+    {
+      "id": 1,
+      "name": "",
+      "team": "Team 2",
+      "first_frame": 0,
+      "last_frame": 57
+    },
+    {
+      "id": 2,
+      "name": "",
+      "team": "Team 1",
+      "first_frame": 0,
+      "last_frame": 48
+    },
+    {
+      "id": 3,
+      "name": "",
+      "team": "Team 2",
+      "first_frame": 0,
+      "last_frame": 39
+    },
+    {
+      "id": 4,
+      "name": "",
+      "team": "Team 2",
+      "first_frame": 0,
+      "last_frame": 24
+    },
+    {
+      "id": 6,
+      "name": "",
+      "team": "Team 1",
+      "first_frame": 15,
+      "last_frame": 42
+    },
+    {
+      "id": 8,
+      "name": "",
+      "team": "Team 1",
+      "first_frame": 18,
+      "last_frame": 42
+    },
+    {
+      "id": 9,
+      "name": "",
+      "team": "Team 1",
+      "first_frame": 30,
+      "last_frame": 33
+    },
+    {
+      "id": 13,
+      "name": "",
+      "team": "Unknown",
+      "first_frame": 51,
+      "last_frame": 54
+    }
+  ]
+}
