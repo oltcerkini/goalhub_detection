@@ -21,6 +21,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from detector import PlayerDetector
 from team_classifier import TeamClassifier
+from ball_detector import BallDetector
 
 
 def main():
@@ -66,6 +67,7 @@ def main():
     # Modules
     detector = PlayerDetector(model_size=args.model)
     classifier = TeamClassifier()
+    ball_detector = BallDetector()
 
     all_players = {}
     frame_idx = 0
@@ -86,6 +88,7 @@ def main():
             frame, polygon, threshold=args.threshold,
             resize_long_side=args.resize if args.resize > 0 else None,
         )
+        ball_xy = ball_detector.detect(frame, polygon=polygon)
 
         annotated = frame.copy()
         cv2.polylines(annotated, [polygon.reshape(-1, 1, 2).astype(np.int32)],
@@ -114,6 +117,19 @@ def main():
                     "confidence": float(conf),
                     "team": team,
                 }
+
+        # Ball
+        if ball_xy is not None:
+            cx, cy, conf = ball_xy
+            cv2.circle(annotated, (int(cx), int(cy)), 6, (0, 200, 255), -1)
+            cv2.putText(annotated, f"ball {conf:.2f}",
+                        (int(cx) + 10, int(cy) + 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 200, 255), 1)
+            # Trail
+            for j, (tx, ty) in enumerate(ball_detector.trail):
+                alpha = j / len(ball_detector.trail)
+                cv2.circle(annotated, (int(tx), int(ty)), 3,
+                           (0, int(200 * alpha), 255), -1)
 
         cv2.putText(annotated, f"Frame {frame_idx}/{total}",
                     (12, h - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)

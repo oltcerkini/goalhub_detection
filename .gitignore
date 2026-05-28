@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pt
+*.pth
+*.mp4
+*.avi
+*.mov
+*_processed.*
+*_annotated.*
+*_goalhub.json
+debug_*.py
+debug_*.jpg
+debug_*.png

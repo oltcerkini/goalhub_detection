@@ -37,6 +37,7 @@ import numpy as np
 from detector import PlayerDetector
 from pitch_calibrator import PitchCalibrator
 from team_classifier import TeamClassifier
+from ball_detector import BallDetector
 
 # ---------------------------------------------------------------------------
 WINDOW = "GoalHub Detection"
@@ -103,6 +104,7 @@ class GoalHubApp:
         self.detector = PlayerDetector(model_size=model_size)
         self.calibrator = PitchCalibrator()
         self.classifier = TeamClassifier()
+        self.ball_detector = None
 
         # Display
         self._overlay = None
@@ -275,6 +277,8 @@ class GoalHubApp:
         writer = cv2.VideoWriter(self.output_path, codec, self.vid_fps,
                                  (self.vid_w, self.vid_h))
 
+        self.ball_detector = BallDetector()
+
         # Player tracking across frames
         all_players = {}        # track_id -> {name, team, first_frame, last_frame}
         save_data = {"my_team": f"Team {self.my_team + 1}" if self.my_team is not None else "All"}
@@ -301,6 +305,7 @@ class GoalHubApp:
                     frame, self.polygon, threshold=self.threshold,
                     resize_long_side=self.resize_long_side,
                 )
+                ball_xy = self.ball_detector.detect(frame, polygon=self.polygon)
 
                 # Annotate
                 annotated = frame.copy()
@@ -359,6 +364,17 @@ class GoalHubApp:
                         label = f"{label} {conf:.2f}".strip()
                         cv2.putText(annotated, label, (x1, max(y1 - 5, 15)),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, colour, 1)
+
+                # Ball
+                if ball_xy is not None:
+                    cx, cy, conf = ball_xy
+                    cv2.circle(annotated, (int(cx), int(cy)), 6, (0, 200, 255), -1)
+                    cv2.putText(annotated, f"ball {conf:.2f}",
+                                (int(cx) + 10, int(cy) + 4),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 200, 255), 1)
+                    for tx, ty in self.ball_detector.trail:
+                        cv2.circle(annotated, (int(tx), int(ty)), 3,
+                                   (0, 200, 255), -1)
 
                 # Overlay frame counter
                 cv2.putText(annotated, f"Frame {frame_idx}/{self.vid_total}",
