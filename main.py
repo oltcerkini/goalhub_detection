@@ -38,6 +38,7 @@ from detector import PlayerDetector
 from pitch_calibrator import PitchCalibrator
 from team_classifier import TeamClassifier
 from ball_detector import BallDetector
+from player_tracker import PlayerTracker
 
 # ---------------------------------------------------------------------------
 WINDOW = "GoalHub Detection"
@@ -64,7 +65,7 @@ VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".m4v"}
 # GoalHub Application
 # ===================================================================
 class GoalHubApp:
-    def __init__(self, input_path, model_size="medium", threshold=0.5,
+    def __init__(self, input_path, model_size="medium", threshold=0.30,
                  model_type="detection", output=None, skip_frames=1,
                  resize_long_side=1280):
         if not os.path.isfile(input_path):
@@ -138,11 +139,10 @@ class GoalHubApp:
               f"{self.vid_total} frames")
 
     def _setup_tracker(self):
-        """Try to initialise ByteTrack for player IDs across frames."""
+        """Initialise PlayerTracker with ByteTrack + persistence."""
         try:
-            import supervision as sv
-            self.tracker = sv.ByteTrack()
-            print("  Tracking enabled (ByteTrack)")
+            self.tracker = PlayerTracker(max_missed=5, proximity_px=80)
+            print("  Tracking enabled (PlayerTracker + ByteTrack)")
         except Exception:
             self.tracker = None
             print("  Tracking unavailable — per-frame detections only")
@@ -316,8 +316,7 @@ class GoalHubApp:
                     # Track
                     if self.tracker is not None:
                         try:
-                            tracked = self.tracker.update_with_detections(inside)
-                            dets = tracked
+                            dets = self.tracker.update(inside)
                         except Exception as e:
                             print(f"    [!] Tracker error: {e}")
                             dets = inside
@@ -332,8 +331,8 @@ class GoalHubApp:
                         x1, y1, x2, y2 = map(int, dets.xyxy[i])
                         conf = dets.confidence[i]
 
-                        if self.tracker is not None and hasattr(dets, 'tracker_id') and dets.tracker_id is not None:
-                            tid = int(dets.tracker_id[i])
+                        tid = int(dets.tracker_id[i]) if (dets.tracker_id is not None and len(dets.tracker_id) > i) else -1
+                        if tid > 0:
                             if tid not in all_players:
                                 all_players[tid] = {
                                     "id": tid,
@@ -345,11 +344,6 @@ class GoalHubApp:
                             all_players[tid]["last_frame"] = frame_idx
                             label = f"#{tid}"
                         else:
-                            # Debug tracking failure
-                            if not hasattr(dets, 'tracker_id'):
-                                print(f"    [!] TRACK: no tracker_id attr, type={type(dets).__name__}", flush=True)
-                            elif dets.tracker_id is None:
-                                print(f"    [!] TRACK: tracker_id is None, dets len={len(dets)}", flush=True)
                             label = ""
 
                         # Colour
@@ -634,8 +628,8 @@ def main():
     ap.add_argument("--model", default="medium",
                     choices=["nano", "small", "medium", "large"],
                     help="rf-detr model size (default: medium)")
-    ap.add_argument("--threshold", type=float, default=0.5,
-                    help="Detection confidence threshold (default: 0.5)")
+    ap.add_argument("--threshold", type=float, default=0.30,
+                    help="Detection confidence threshold (default: 0.30)")
     ap.add_argument("--resize", type=int, default=1280,
                     help="Downscale so longest edge = N px before detection (default: 1280, "
                          "0 = no resize)")

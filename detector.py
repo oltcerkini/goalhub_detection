@@ -128,18 +128,20 @@ class PlayerDetector:
         if people is None or len(people) == 0:
             return None, None
 
-        # Compute center of each detection
-        centers = np.column_stack([
-            (people.xyxy[:, 0] + people.xyxy[:, 2]) / 2,
-            (people.xyxy[:, 1] + people.xyxy[:, 3]) / 2,
+        # Compute bottom-center of each detection (FEET position — feet are on the pitch)
+        # Using feet position instead of bbox center eliminates flickering
+        # when the player's torso center drifts near the polygon boundary.
+        feet_positions = np.column_stack([
+            (people.xyxy[:, 0] + people.xyxy[:, 2]) / 2,  # center x
+            people.xyxy[:, 3],  # bottom y (feet)
         ])
 
-        # Use distance-based check with a margin (negative = outside, positive = inside)
-        # margin_px allows players slightly off the line to still be included
-        margin_px = 80
+        # Margin: allow players whose feet are up to 30px outside the pitch line
+        # (sideline players, sliding tackles, etc.)
+        margin_px = 30
         distances = np.array([
             cv2.pointPolygonTest(polygon, (float(c[0]), float(c[1])), True)
-            for c in centers
+            for c in feet_positions
         ])
         inside = distances >= -margin_px
 
