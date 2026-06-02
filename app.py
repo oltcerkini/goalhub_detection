@@ -145,7 +145,7 @@ async def start_processing(data: dict):
     video_name = data.get("video_name")
     threshold = data.get("threshold", 0.20)
     skip = data.get("skip", 3)
-    resize = data.get("resize", 1280)
+    resize = data.get("resize", 2560)
     model = data.get("model", "medium")
     team_tracks = data.get("team_tracks", "")
 

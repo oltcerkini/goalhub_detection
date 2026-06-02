@@ -40,7 +40,7 @@ def main():
     ap.add_argument("--threshold", type=float, default=0.20)
     ap.add_argument("--model", default="medium")
     ap.add_argument("--skip", type=int, default=3)
-    ap.add_argument("--resize", type=int, default=1280)
+    ap.add_argument("--resize", type=int, default=2560)
     ap.add_argument("--my-team", type=int, default=None, choices=[0, 1],
                     help="Display labels for one team (0 or 1). Overrides calibration.")
     ap.add_argument("--output-dir", type=str, default=None,
