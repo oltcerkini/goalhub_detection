@@ -1,13 +1,11 @@
 """Team classifier — clusters players into exactly 2 teams by jersey colour.
 
-Frame-by-frame KMeans with majority voting across the entire video.
-Each frame votes independently; final team = majority decision across all frames.
-This makes the classification robust to lighting variations — a few badly-lit
-frames get outvoted by the rest.
+Collects per-frame mean colours per player, then takes the MEDIAN across all
+frames for each player (robust to lighting outliers) and runs a single KMeans.
 """
 
 import numpy as np
-from collections import defaultdict, Counter
+from collections import defaultdict
 from sklearn.cluster import KMeans
 
 
@@ -22,7 +20,7 @@ class TeamClassifier:
         self.torso_ratio = torso_ratio
         self.sat_thresh = sat_threshold
         self.sample_gamma = sample_gamma
-        # Per-frame storage: frame_idx -> {track_id -> mean_hsv_vector}
+        # Per-frame: frame_idx -> {track_id -> mean_hsv}
         self._frame_data = {}
         self._labels = {}
         self._my_team_idx = 0
@@ -32,7 +30,6 @@ class TeamClassifier:
         if frame_idx not in self._frame_data:
             self._frame_data[frame_idx] = {}
 
-        # Only sample every Nth frame
         if len(self._frame_data) > 0 and frame_idx % self.sample_every != 0:
             return
 
@@ -66,7 +63,6 @@ class TeamClassifier:
 
         pixels = crop.reshape(-1, 3).astype(np.float32)
 
-        # Filter to saturated pixels only
         mask = pixels[:, 1] > self.sat_thresh
         coloured = pixels[mask]
         if len(coloured) < 5:
@@ -75,48 +71,44 @@ class TeamClassifier:
             idxs = np.random.choice(len(coloured), 100, replace=False)
             coloured = coloured[idxs]
 
-        # Store the MEAN colour for this (frame, track) — one vector per frame per track
-        mean_colour = coloured.mean(axis=0)
-        self._frame_data[frame_idx][track_id] = mean_colour
+        # Per-frame mean colour for this track
+        self._frame_data[frame_idx][track_id] = coloured.mean(axis=0)
 
     def cluster(self):
-        """Frame-by-frame KMeans, then majority vote across the whole video.
-
-        For each frame with enough players, run 2-cluster KMeans and record
-        which team each player was assigned to. Then each player's final team
-        is the one they were assigned to most often across all frames.
-        """
-        # Group tracks by frame: frame_id -> [(track_id, hsv_vector), ...]
-        frame_votes = defaultdict(list)  # track_id -> [0 or 1 per frame]
-
+        """Compute per-track MEDIAN across all frames, then single KMeans."""
+        # Build per-track list of per-frame mean colours
+        track_frames = defaultdict(list)
         for frame_idx, tracks in self._frame_data.items():
-            tids = list(tracks.keys())
-            feats = np.array([tracks[t] for t in tids], dtype=np.float32)
+            for tid, colour in tracks.items():
+                track_frames[tid].append(colour)
 
-            if len(tids) < 2:
-                continue
+        tids = list(track_frames.keys())
+        if len(tids) < 2:
+            print(f"  TeamClassifier: not enough tracks ({len(tids)} < 2)")
+            return
 
-            # Simple weighted: Hue×3 for discrimination
-            weighted = feats.copy()
-            weighted[:, 0] *= 3.0
+        # Median across frames for each track — ignores lighting outliers
+        track_feats = {}
+        for tid in tids:
+            arr = np.array(track_frames[tid], dtype=np.float32)
+            track_feats[tid] = np.median(arr, axis=0)
 
-            kmeans = KMeans(n_clusters=2, random_state=0, n_init=3).fit(weighted)
-            for i, tid in enumerate(tids):
-                frame_votes[tid].append(int(kmeans.labels_[i]))
+        data = np.array([track_feats[t] for t in tids], dtype=np.float32)
+        # Weighted: Hue×3
+        weighted = data.copy()
+        weighted[:, 0] *= 3.0
 
-        # Majority vote across all frames for each track
-        for tid, votes in frame_votes.items():
-            most_common = Counter(votes).most_common(1)[0][0]
-            self._labels[tid] = "My Team" if most_common == self._my_team_idx else "Team 2"
+        kmeans = KMeans(n_clusters=2, random_state=0, n_init=5).fit(weighted)
+
+        for i, tid in enumerate(tids):
+            c = int(kmeans.labels_[i])
+            self._labels[tid] = "My Team" if c == self._my_team_idx else "Team 2"
 
         n_my = sum(1 for v in self._labels.values() if v == "My Team")
         n_t2 = sum(1 for v in self._labels.values() if v == "Team 2")
-        n_total = len(frame_votes)
-        print(f"  TeamClassifier: {n_my} My Team, {n_t2} Team 2"
-              f" ({n_total} tracks)")
+        print(f"  TeamClassifier: {n_my} My Team, {n_t2} Team 2 ({len(tids)} tracks)")
 
     def set_my_team(self, team_index):
-        """Set which KMeans cluster (0 or 1) corresponds to 'My Team'."""
         self._my_team_idx = team_index
 
     def get_team(self, track_id):
