@@ -335,9 +335,9 @@ def main():
                 tag = " [T2]"
             else:
                 tag = ""
-            label = f"#{tid}{tag} {conf:.2f}"
-            cv2.putText(annotated, label, (x1, max(y1 - 5, 15)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.40, colour, 1)
+            label = f"#{tid}{tag}"
+            cv2.putText(annotated, label, (x1, max(y1 - 8, 18)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.60, colour, 2)
 
             # Distance display
             cx = (x1 + x2) / 2.0
@@ -369,17 +369,17 @@ def main():
         if render_distances:
             sorted_dists = sorted(render_distances.items(), key=lambda x: -x[1])[:10]
             overlay = annotated.copy()
-            bx1, bx2 = w - 220, w - 10
-            by1, by2 = 10, 30 + len(sorted_dists) * 20
+            bx1, bx2 = w - 340, w - 10
+            by1, by2 = 10, 45 + len(sorted_dists) * 28
             cv2.rectangle(overlay, (bx1, by1), (bx2, by2), (0, 0, 0), -1)
             cv2.addWeighted(overlay, 0.5, annotated, 0.5, 0, annotated)
-            cv2.putText(annotated, "Distance (m)", (bx1 + 8, by1 + 16),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
+            cv2.putText(annotated, "Distance (m)", (bx1 + 12, by1 + 22),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 2)
             for rank, (tid, d) in enumerate(sorted_dists):
-                y = by1 + 36 + rank * 18
+                y = by1 + 48 + rank * 25
                 colour = (0, 255, 0) if rank < 5 else (180, 180, 180)
                 cv2.putText(annotated, f"#{tid}: {d:.1f}m",
-                            (bx1 + 8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.40, colour, 1)
+                            (bx1 + 12, y), cv2.FONT_HERSHEY_SIMPLEX, 0.50, colour, 1)
 
         cv2.putText(annotated, f"Frame {frame_idx}/{total}",
                     (12, h - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
