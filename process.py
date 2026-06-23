@@ -137,6 +137,8 @@ def main():
     processed = 0
     t_start = time.time()
     team_classifier = TeamClassifier()
+    if my_team is not None:
+        team_classifier.set_my_team(my_team)
 
     # ── FIRST PASS: detect + track + collect data ─────────────────────
     print("\nFirst pass — detecting & tracking…")
