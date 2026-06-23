@@ -152,17 +152,17 @@ class StatsComputer:
         """Detect when ball crosses a goal line between two posts.
 
         ball_trail: list of (x, y, frame, conf)
-        goals_px: list of 4 (gx, gy) — left goal (Lpost, Rpost), right goal (Lpost, Rpost)
+        goals_px: list of 8 (gx, gy) — left goal 4pts (BL, BR, TL, TR), right goal 4pts (BL, BR, TL, TR)
 
         Returns list of dicts: [{frame, goal_index, goal_x, goal_y}, …]
         """
-        if not ball_trail or not goals_px or len(goals_px) < 4:
+        if not ball_trail or not goals_px or len(goals_px) < 8:
             return []
 
-        # Build goal segments: [(x1,y1,x2,y2), ...]
+        # Build goal segments from top bar (TL→TR) of each 4-point goal
         segments = []
         for g_idx in range(2):
-            i = g_idx * 2
+            i = g_idx * 4 + 2  # TL index within each goal's 4 points
             segments.append((goals_px[i][0], goals_px[i][1],
                              goals_px[i + 1][0], goals_px[i + 1][1]))
 
@@ -312,6 +312,66 @@ class StatsComputer:
         return passes
 
     # ------------------------------------------------------------------
+    # Possession stats
+    # ------------------------------------------------------------------
+
+    def compute_possession(self, ball_trail, player_detections, team_labels=None):
+        """Compute ball possession per team.
+
+        Args:
+            ball_trail: list of (x, y, frame, conf)
+            player_detections: list of dicts with track_id, frame, bbox
+            team_labels: dict track_id -> team name ('My Team' / 'Team 2' / etc.)
+
+        Returns:
+            dict with frames_per_team, percentage_per_team, total_frames
+        """
+        if not ball_trail or not player_detections:
+            return {"frames_per_team": {}, "percentage_per_team": {}, "total_frames": 0}
+
+        # Group players by frame with positions
+        players_by_frame = defaultdict(list)
+        track_teams = {}
+        for d in player_detections:
+            tid = d["track_id"]
+            if tid <= 0:
+                continue
+            bbox = d["bbox"]
+            cx = (bbox[0] + bbox[2]) / 2.0
+            cy = (bbox[1] + bbox[3]) / 2.0
+            players_by_frame[d["frame"]].append({"tid": tid, "cx": cx, "cy": cy})
+            if team_labels:
+                track_teams[tid] = team_labels.get(tid, "Unknown")
+
+        # Per frame: nearest player to ball → their team
+        team_frames = defaultdict(int)
+        total_with_ball = 0
+
+        for bx, by, frame, conf in ball_trail:
+            if conf < 0.3:  # skip low-confidence ball detections
+                continue
+            players = players_by_frame.get(frame, [])
+            if not players:
+                continue
+
+            nearest = min(players, key=lambda p: (p["cx"] - bx) ** 2 + (p["cy"] - by) ** 2)
+            team = track_teams.get(nearest["tid"], "Unknown")
+
+            team_frames[team] += 1
+            total_with_ball += 1
+
+        percentages = {}
+        if total_with_ball > 0:
+            for team, frames in team_frames.items():
+                percentages[team] = round(frames / total_with_ball * 100, 1)
+
+        return {
+            "frames_per_team": dict(team_frames),
+            "percentage_per_team": percentages,
+            "total_frames": total_with_ball,
+        }
+
+    # ------------------------------------------------------------------
     # Assists
     # ------------------------------------------------------------------
 
@@ -350,12 +410,18 @@ class StatsComputer:
     # ------------------------------------------------------------------
 
     def compute(self, ball_trail, player_detections, goals_px=None,
-                total_frames=None, fps=None, frame_skip=None):
-        """Convenience: run all stats and return a single dict."""
+                total_frames=None, fps=None, frame_skip=None,
+                team_labels=None):
+        """Convenience: run all stats and return a single dict.
+
+        Args:
+            team_labels: dict track_id -> team name for possession tracking.
+        """
         distances = self.per_track_distance(player_detections)
         goals = self.detect_goals(ball_trail, goals_px or [])
         passes = self.detect_passes(ball_trail, player_detections)
         assists = self.compute_assists(passes, goals)
+        possession = self.compute_possession(ball_trail, player_detections, team_labels)
         sorted_distances = sorted(distances.items(), key=lambda x: x[1], reverse=True)
 
         return {
@@ -366,4 +432,5 @@ class StatsComputer:
             "goals": goals,
             "passes": passes,
             "assists": assists,
+            "possession": possession,
         }

@@ -1,154 +1,262 @@
-"""Player detection using rf-detr (COCO-pretrained, filters for 'person' class)."""
+"""Unified player + ball + referee detection using YOLO26m.
 
-import sys
+One model, one inference call per frame. Supports both the COCO-pretrained
+yolo26m.pt and the fine-tuned soccana variant (Player, Ball, Referee).
+
+Configurable inference resolution: bump imgsz to 2560 for 4K footage
+(default 1280 misses many small players and the ball at distance).
+"""
+
 import numpy as np
 import cv2
+import supervision as sv
+
+# Our internal class IDs (aligns with soccana fine-tuned model)
+PLAYER = 0
+BALL = 1
+REFEREE = 2
+
+COCO_TO_OURS = {0: PLAYER, 32: BALL}  # person→player, sports_ball→ball
 
 
-class PlayerDetector:
-    """Wraps rf-detr for person detection with pitch-based filtering."""
+class YOLODetector:
+    """Wraps YOLO for unified football detection.
 
-    def __init__(self, model_size="medium"):
-        self.model_size = model_size
-        self._model = None
-        self._person_class_id = 1  # rf-detr COCO dict: person = 1
-        self._model_loaded = False
+    Higher imgsz = better small-object detection (players at distance, ball)
+    but slower. For 4K football footage, 2560 is recommended. 1280 is the
+    minimum that works for close-up shots.
+    """
 
-    def _load_model(self):
-        if self._model_loaded:
-            return
-        try:
-            if self.model_size == "nano":
-                from rfdetr import RFDETRNano as Model
-            elif self.model_size == "small":
-                from rfdetr import RFDETRSmall as Model
-            elif self.model_size == "large":
-                from rfdetr import RFDETRLarge as Model
-            elif self.model_size == "xlarge":
-                from rfdetr import RFDETRXLarge as Model
-            else:
-                from rfdetr import RFDETRMedium as Model
+    # Default per-class confidence thresholds (used when conf=None)
+    DEFAULT_CONF = {PLAYER: 0.20, BALL: 0.06, REFEREE: 0.20}
 
-            print(f"Loading RF-DETR-{self.model_size.capitalize()}...")
-            self._model = Model()
-            self._model.optimize_for_inference()
-            self._model_loaded = True
-            print("Model loaded.")
-        except ImportError:
-            print(
-                "ERROR: rfdetr package not found. Install with: pip install rfdetr",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        except Exception as e:
-            print(f"ERROR loading rf-detr model: {e}", file=sys.stderr)
-            sys.exit(1)
-
-    def detect(self, image, threshold=0.5, resize_long_side=None):
-        """Run detection and return sv.Detections filtered for person class.
-
-        For high-resolution images (e.g. 4K), pass resize_long_side to
-        downscale before detection — this drastically improves small-object
-        recall since the model was trained at ~640px scale.
-
-        Args:
-            image: BGR numpy array
-            threshold: confidence threshold
-            resize_long_side: if set, downscale so longest edge = this (px)
-
-        Returns:
-            sv.Detections containing only 'person' class detections,
-            or None on failure.
+    def __init__(self, model_path=None, conf=0.25, iou=0.5, imgsz=2560,
+                 per_class_conf=None):
         """
-        self._load_model()
+        Args:
+            model_path: Path to .pt file. None = yolo26m.pt (auto-download).
+            conf: Base confidence threshold. Per-class thresholds override this.
+            iou: NMS IoU threshold.
+            imgsz: Inference resolution (longest edge). 2560 recommended for 4K.
+            per_class_conf: Dict {class_id: threshold} to override base conf.
+                            Default uses PLAYER=0.25, BALL=0.08, REFEREE=0.25.
+        """
+        from ultralytics import YOLO
+        if model_path is None:
+            model_path = "yolo26m.pt"
+        print(f"Loading YOLO model: {model_path} (imgsz={imgsz})")
+        self.yolo = YOLO(model_path)
+        self.conf = conf
+        self.iou = iou
+        self.imgsz = imgsz
+        self._model_path = model_path
 
-        h, w = image.shape[:2]
-
-        if resize_long_side is not None and max(h, w) > resize_long_side:
-            scale = resize_long_side / max(h, w)
-            new_w, new_h = int(w * scale), int(h * scale)
-            detect_img = cv2.resize(image, (new_w, new_h))
-            did_resize = True
+        # Detect model type by number of classes
+        self._names = self.yolo.names
+        nc = len(self._names)
+        if nc == 3:
+            print(f"  Detected fine-tuned model ({nc} classes: {self._names})")
+            self._class_map = {0: PLAYER, 1: BALL, 2: REFEREE}
         else:
-            detect_img = image
-            scale = 1.0
-            did_resize = False
+            print(f"  Detected base COCO model ({nc} classes)")
+            self._class_map = COCO_TO_OURS
 
-        # rf-detr expects RGB; convert from BGR
-        rgb = cv2.cvtColor(detect_img, cv2.COLOR_BGR2RGB)
+        # Per-class confidence overrides
+        self._per_class_conf = per_class_conf or dict(self.DEFAULT_CONF)
 
-        try:
-            detections = self._model.predict(rgb, threshold=threshold)
-        except Exception as e:
-            print(f"Detection error: {e}", file=sys.stderr)
-            return None
+    # ── Main detection ───────────────────────────────────────────────────────
 
-        if detections is None or len(detections) == 0:
-            print("No detections found.")
-            return None
+    def detect(self, image, conf=None):
+        """Run detection and return sv.Detections with unified class_ids.
 
-        # Filter to person class only
-        person_mask = detections.class_id == self._person_class_id
-        people = detections[person_mask]
-
-        if len(people) == 0:
-            print("No people detected.")
-            return None
-
-        # Scale boxes back to original image coordinates
-        if did_resize:
-            inv_scale = 1.0 / scale
-            people.xyxy[:, [0, 2]] *= inv_scale
-            people.xyxy[:, [1, 3]] *= inv_scale
-
-        print(f"Detected {len(people)} people.")
-
-        if resize_long_side:
-            # Show per-player pixel height for debugging
-            heights = people.xyxy[:, 3] - people.xyxy[:, 1]
-            print(f"  Player height range: {heights.min():.0f}-{heights.max():.0f}px "
-                  f"in original ({w}x{h})")
-
-        return people
-
-    def detect_and_filter_by_polygon(self, image, polygon, threshold=0.5,
-                                     resize_long_side=None):
-        """Detect people and filter those inside a pitch polygon.
-
-        Args:
-            image: BGR numpy array
-            polygon: (N, 2) array of polygon vertices (pitch boundary)
-            threshold: confidence threshold
-            resize_long_side: downscale to this size before detection
-
-        Returns:
-            tuple (all_people, inside_people) where both are sv.Detections
+        Returns sv.Detections with our internal class mapping:
+            0 = Player, 1 = Ball, 2 = Referee
+        Returns None if nothing detected.
         """
-        people = self.detect(image, threshold, resize_long_side=resize_long_side)
-        if people is None or len(people) == 0:
-            return None, None
+        results = self.yolo(
+            image, conf=conf or self.conf, iou=self.iou,
+            imgsz=self.imgsz, verbose=False,
+        )
+        boxes = results[0].boxes
+        if boxes is None or len(boxes) == 0:
+            return None
 
-        # Compute bottom-center of each detection (FEET position — feet are on the pitch)
-        # Using feet position instead of bbox center eliminates flickering
-        # when the player's torso center drifts near the polygon boundary.
-        feet_positions = np.column_stack([
-            (people.xyxy[:, 0] + people.xyxy[:, 2]) / 2,  # center x
-            people.xyxy[:, 3],  # bottom y (feet)
+        xyxy = boxes.xyxy.cpu().numpy()
+        confs = boxes.conf.cpu().numpy()
+        cls_ids = boxes.cls.cpu().numpy().astype(int)
+
+        # Remap to our internal classes
+        our_cls = []
+        for c in cls_ids:
+            our_cls.append(self._class_map.get(c, -1))
+
+        our_cls = np.array(our_cls, dtype=int)
+
+        # Filter out unmapped classes
+        valid = our_cls >= 0
+        if not valid.any():
+            return None
+
+        detections = sv.Detections(
+            xyxy=xyxy[valid],
+            confidence=confs[valid],
+            class_id=our_cls[valid],
+        )
+        return detections
+
+    def detect_with_per_class_conf(self, image):
+        """Run detection with per-class confidence thresholds.
+
+        Runs YOLO at low base conf (0.05), then filters each class by its
+        specific threshold. This catches low-confidence balls that would
+        be missed with a single high threshold.
+
+        Returns sv.Detections or None.
+        """
+        results = self.yolo(
+            image, conf=0.05, iou=self.iou,
+            imgsz=self.imgsz, verbose=False,
+        )
+        boxes = results[0].boxes
+        if boxes is None or len(boxes) == 0:
+            return None
+
+        xyxy = boxes.xyxy.cpu().numpy()
+        confs = boxes.conf.cpu().numpy()
+        cls_ids = boxes.cls.cpu().numpy().astype(int)
+
+        our_cls = []
+        for c in cls_ids:
+            our_cls.append(self._class_map.get(c, -1))
+        our_cls = np.array(our_cls, dtype=int)
+
+        # Per-class threshold filter
+        valid = np.ones(len(our_cls), dtype=bool)
+        for i in range(len(our_cls)):
+            if our_cls[i] < 0:
+                valid[i] = False
+            else:
+                min_conf = self._per_class_conf.get(our_cls[i], self.conf)
+                if confs[i] < min_conf:
+                    valid[i] = False
+
+        if not valid.any():
+            return None
+
+        return sv.Detections(
+            xyxy=xyxy[valid],
+            confidence=confs[valid],
+            class_id=our_cls[valid],
+        )
+
+    # ── Convenience filters ──────────────────────────────────────────────────
+
+    def get_players(self, detections):
+        """Filter to Player class only."""
+        if detections is None or len(detections) == 0:
+            return None
+        mask = detections.class_id == PLAYER
+        return detections[mask] if mask.any() else None
+
+    def get_ball(self, detections):
+        """Filter to Ball class only."""
+        if detections is None or len(detections) == 0:
+            return None
+        mask = detections.class_id == BALL
+        return detections[mask] if mask.any() else None
+
+    def get_referees(self, detections):
+        """Filter to Referee class only."""
+        if detections is None or len(detections) == 0:
+            return None
+        mask = detections.class_id == REFEREE
+        return detections[mask] if mask.any() else None
+
+    # ── Polygon filtering ────────────────────────────────────────────────────
+
+    def filter_by_polygon(self, detections, polygon, margin_px=0):
+        """Keep only detections whose feet are inside (or near) the pitch polygon.
+
+        Uses feet position (bottom-center of bbox) to determine pitch membership.
+        margin_px allows players slightly outside the line (sideline tackles, etc).
+
+        Returns filtered sv.Detections.
+        """
+        if detections is None or len(detections) == 0:
+            return None
+
+        feet = np.column_stack([
+            (detections.xyxy[:, 0] + detections.xyxy[:, 2]) / 2,
+            detections.xyxy[:, 3],
         ])
-
-        # Margin: allow players whose feet are up to 30px outside the pitch line
-        # (sideline players, sliding tackles, etc.)
-        margin_px = 30
         distances = np.array([
             cv2.pointPolygonTest(polygon, (float(c[0]), float(c[1])), True)
-            for c in feet_positions
+            for c in feet
         ])
         inside = distances >= -margin_px
+        return detections[inside] if inside.any() else None
 
-        inside_people = people[inside] if inside.any() else None
-        outside_count = (~inside).sum()
-        margin_count = ((distances < 0) & (distances >= -margin_px)).sum()
-        print(f"  {inside.sum()} inside pitch (+ {margin_count} near line), "
-              f"{outside_count} far outside")
+    def detect_and_filter(self, image, polygon=None, conf=None):
+        """Detect and filter to pitch polygon in one call.
 
-        return people, inside_people
+        Uses per-class confidence thresholds by default (lower threshold for
+        ball, higher for players/referees). When conf is explicitly provided,
+        uses that single threshold for all classes.
+
+        Returns:
+            (full_detections, pitch_detections) — both sv.Detections or None.
+        """
+        dets = self.detect_with_per_class_conf(image) if conf is None else self.detect(image, conf=conf)
+        if dets is None:
+            return None, None
+        if polygon is not None:
+            pitch_dets = self.filter_by_polygon(dets, polygon)
+        else:
+            pitch_dets = dets
+        return dets, pitch_dets
+
+    # ── Bbox expansion ─────────────────────────────────────────────────────────
+
+    @staticmethod
+    def expand_bboxes(detections, expand_ratio=0.06, img_shape=None):
+        """Expand all bboxes outward by a percentage of their size.
+
+        YOLO boxes are often tight on the player, cutting off heads/feet.
+        Expanding by 6% ensures the full player is inside the box.
+
+        Args:
+            detections: sv.Detections with xyxy.
+            expand_ratio: Fraction of box width/height to add on each side.
+            img_shape: (h, w) to clamp bboxes to image bounds. Can be None.
+
+        Returns: sv.Detections with expanded xyxy (modified in-place).
+        """
+        if detections is None or len(detections) == 0:
+            return detections
+        ws = detections.xyxy[:, 2] - detections.xyxy[:, 0]
+        hs = detections.xyxy[:, 3] - detections.xyxy[:, 1]
+        dw = ws * expand_ratio
+        dh = hs * expand_ratio
+        detections.xyxy[:, 0] -= dw  # x1
+        detections.xyxy[:, 1] -= dh  # y1
+        detections.xyxy[:, 2] += dw  # x2
+        detections.xyxy[:, 3] += dh  # y2
+        if img_shape is not None:
+            h, w = img_shape[:2]
+            detections.xyxy[:, 0] = np.clip(detections.xyxy[:, 0], 0, w)
+            detections.xyxy[:, 1] = np.clip(detections.xyxy[:, 1], 0, h)
+            detections.xyxy[:, 2] = np.clip(detections.xyxy[:, 2], 0, w)
+            detections.xyxy[:, 3] = np.clip(detections.xyxy[:, 3], 0, h)
+        return detections
+
+    # ── Model info ───────────────────────────────────────────────────────────
+
+    @property
+    def class_names(self):
+        """Return dict mapping our internal class_id → name."""
+        return {PLAYER: "Player", BALL: "Ball", REFEREE: "Referee"}
+
+    @property
+    def is_finetuned(self):
+        """True if using soccana fine-tuned model (3-class)."""
+        return len(self._names) == 3

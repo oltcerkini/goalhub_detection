@@ -1,246 +1,93 @@
-"""Colour-based team classification using K-means on HSV jersey regions.
+"""Team classifier — clusters players into teams by jersey color.
 
-Strategy:
-  1. For each player crop, extract the upper-body region (jersey area)
-  2. Remove grass pixels (green), white pixels (lines), dark pixels (shadows)
-  3. Cluster remaining pixels per-player to find dominant jersey colour
-  4. Globally cluster all player jersey colours into 2 teams
+Pure 2-cluster KMeans on HSV color samples from player bounding boxes.
+Labels: 'My Team', 'Team 2', or 'Unknown'.
 """
 
 import numpy as np
-import cv2
+from collections import defaultdict
 from sklearn.cluster import KMeans
 
 
 class TeamClassifier:
-    """Clusters detected players into two teams by dominant jersey colour."""
+    """Classifies tracked players into 'My Team' / 'Team 2'."""
 
-    # HSV ranges for background removal
-    _GRASS_H_RANGE = (35, 85)
-    _WHITE_V_MIN = 200
-    _WHITE_S_MAX = 30
-    _DARK_V_MAX = 30
+    def __init__(self, min_samples=10, sample_every=5,
+                 torso_ratio=(0.15, 0.55), saturation_threshold=30):
+        self.min_samples = min_samples
+        self.sample_every = sample_every
+        self.torso_ratio = torso_ratio
+        self.sat_thresh = saturation_threshold
+        self._samples = defaultdict(list)
+        self._labels = {}
 
-    def __init__(self):
-        self.labels = {}         # detection-index -> 0|1
-        self.cluster_centers = None  # (2, 3) HSV
-        self.my_team = None
-        self._team_bgr = [(0, 255, 0), (255, 0, 100)]  # green, hot pink
-        # Per-track team cache for consistent cross-frame classification
-        self._track_team = {}     # track_id -> team (0 or 1, once confident)
-        self._track_votes = {}    # track_id -> {0: count, 1: count}
-
-    def classify(self, image, detections):
-        """Assign team labels (0/1) to each detection.
-
-        Detects ALL players first, then divides by colour.
-
-        Args:
-            image: BGR numpy array
-            detections: sv.Detections (pre-filtered to inside-pitch)
-
-        Returns:
-            dict mapping detection-index -> team (0 or 1), or None if < 4 players
-        """
-        self.labels = {}
-        features = []
-        valid = []
-
-        for i in range(len(detections)):
-            x1, y1, x2, y2 = map(int, detections.xyxy[i])
-            if y1 >= y2 or x1 >= x2:
-                continue
-
-            crop = image[y1:y2, x1:x2]
-            if crop.size == 0:
-                continue
-
-            color_feat = self._extract_jersey_colour(crop)
-            if color_feat is not None:
-                features.append(color_feat)
-                valid.append(i)
-
-        if len(valid) < 4:
-            print(f"  Too few players for team classification ({len(valid)}).")
-            return None
-
-        features = np.array(features)
-        kmeans = KMeans(n_clusters=2, random_state=0, n_init=10)
-        preds = kmeans.fit_predict(features)
-
-        for idx, label in zip(valid, preds):
-            self.labels[idx] = int(label)
-
-        self.cluster_centers = kmeans.cluster_centers_
-        self._assign_team_colours()
-        n_team0 = sum(1 for l in self.labels.values() if l == 0)
-        n_team1 = sum(1 for l in self.labels.values() if l == 1)
-        print(f"  Classified {len(self.labels)} players: Team1={n_team0}, Team2={n_team1}")
-        return self.labels
-
-    def set_my_team(self, team_idx):
-        """Set which team (0 or 1) is 'my team'."""
-        self.my_team = team_idx
-        if team_idx == 0:
-            self._team_bgr = [(0, 255, 0), (255, 0, 100)]
-        else:
-            self._team_bgr = [(255, 0, 100), (0, 255, 0)]
-        print(f"  My team -> Team {team_idx + 1}")
-
-    def classify_frame(self, image, detections):
-        """Classify using cached cluster centres (fast, no retraining).
-
-        Must call classify() at least once first to set cluster_centers.
-        Falls back to classify() if no cached model exists.
-        """
-        if self.cluster_centers is None:
-            return self.classify(image, detections)
-
-        self.labels = {}
-        c0, c1 = self.cluster_centers
-
-        for i in range(len(detections)):
-            x1, y1, x2, y2 = map(int, detections.xyxy[i])
-            if y1 >= y2 or x1 >= x2:
-                continue
-            crop = image[y1:y2, x1:x2]
-            if crop.size == 0:
-                continue
-            feat = self._extract_jersey_colour(crop)
-            if feat is None:
-                continue
-            dist0 = np.linalg.norm(feat - c0)
-            dist1 = np.linalg.norm(feat - c1)
-            self.labels[i] = 0 if dist0 < dist1 else 1
-
-        return self.labels
-
-    def get_colour(self, detection_idx):
-        """Get the display colour for a detection based on its team."""
-        team = self.labels.get(detection_idx, 0)
-        return self._team_bgr[team]
-
-    def get_team_name(self, detection_idx):
-        """Return 'My Team', 'Opponent', or 'Unknown'."""
-        team = self.labels.get(detection_idx)
-        if team is None:
-            return "Unknown"
-        if self.my_team is not None and team == self.my_team:
-            return "My Team"
-        return f"Team {team + 1}"
-
-    # ------------------------------------------------------------------
-    # Per-track team cache (consistent across frames)
-    # ------------------------------------------------------------------
-
-    def update_track_vote(self, track_id, detection_idx):
-        """Record a vote for this track_id's team based on current frame label."""
-        team = self.labels.get(detection_idx)
-        if team is None:
+    def sample(self, frame, track_id, bbox, frame_idx):
+        if len(self._samples[track_id]) > 0 and frame_idx % self.sample_every != 0:
             return
-        if track_id not in self._track_votes:
-            self._track_votes[track_id] = {0: 0, 1: 0}
-        self._track_votes[track_id][team] += 1
 
-        # Once we have 3+ votes and 75%+ majority, lock in the team
-        votes = self._track_votes[track_id]
-        total = votes[0] + votes[1]
-        if total >= 3 and track_id not in self._track_team:
-            if votes[0] / total >= 0.75:
-                self._track_team[track_id] = 0
-            elif votes[1] / total >= 0.75:
-                self._track_team[track_id] = 1
+        x1, y1, x2, y2 = bbox
+        h, w = frame.shape[:2]
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(w, x2), min(h, y2)
+        if x2 <= x1 or y2 <= y1:
+            return
 
-    def get_track_team_name(self, track_id):
-        """Get team name for a track_id from cache, or the per-frame label."""
-        # First check if we have a locked-in team for this track
-        team = self._track_team.get(track_id)
-        if team is not None:
-            return self._format_team_name(team)
+        torso_top = y1 + int((y2 - y1) * self.torso_ratio[0])
+        torso_bot = y1 + int((y2 - y1) * self.torso_ratio[1])
+        if torso_bot <= torso_top:
+            return
 
-        # Fall back to majority vote if available
-        votes = self._track_votes.get(track_id)
-        if votes and (votes[0] + votes[1]) >= 2:
-            team = 0 if votes[0] >= votes[1] else 1
-            return self._format_team_name(team)
+        torso = frame[torso_top:torso_bot, x1:x2]
+        if torso.size == 0:
+            return
 
-        return "Unknown"
+        import cv2
+        hsv = cv2.cvtColor(torso, cv2.COLOR_BGR2HSV)
+        cy, cx = hsv.shape[0] // 2, hsv.shape[1] // 2
+        crop = hsv[cy // 2:cy + cy // 2, cx // 2:cx + cx // 2]
+        if crop.size == 0:
+            crop = hsv
 
-    def _format_team_name(self, team):
-        """Format a team number into display name."""
-        if self.my_team is not None and team == self.my_team:
-            return "My Team"
-        return f"Team {team + 1}"
+        pixels = crop.reshape(-1, 3).astype(np.float32)
+        mask = pixels[:, 1] > self.sat_thresh
+        coloured = pixels[mask]
+        if len(coloured) < 5:
+            return
+        if len(coloured) > 50:
+            idxs = np.random.choice(len(coloured), 50, replace=False)
+            coloured = coloured[idxs]
 
-    def reset_track_cache(self):
-        """Clear per-track team cache (e.g., for new video)."""
-        self._track_team.clear()
-        self._track_votes.clear()
+        self._samples[track_id].extend(coloured.tolist())
 
-    # ------------------------------------------------------------------
-    # Improved colour extraction with background pixel removal
-    # ------------------------------------------------------------------
+    def cluster(self):
+        """Pure 2-cluster KMeans. Labels: 'My Team', 'Team 2'."""
+        track_colours = {}
+        for tid, samples in self._samples.items():
+            if len(samples) < self.min_samples:
+                continue
+            arr = np.array(samples, dtype=np.float32)
+            track_colours[tid] = arr.mean(axis=0)
 
-    def _extract_jersey_colour(self, player_crop):
-        """Extract dominant HSV from the upper-body region with background removal."""
-        h, w = player_crop.shape[:2]
-        if h < 15 or w < 10:
-            return None
+        tids = list(track_colours.keys())
+        if len(tids) < 2:
+            print(f"  TeamClassifier: not enough tracks ({len(tids)} < 2)")
+            return
 
-        # Upper body: ~10% to ~50% of bbox height (avoids head/grass/shorts)
-        top = int(h * 0.10)
-        bot = int(h * 0.50)
-        left = int(w * 0.15)
-        right = int(w * 0.85)
-        if top >= bot or left >= right:
-            return None
+        data = np.array([track_colours[t] for t in tids], dtype=np.float32)
+        kmeans = KMeans(n_clusters=2, random_state=0, n_init=5).fit(data)
 
-        region = player_crop[top:bot, left:right]
-        if region.size == 0:
-            return None
+        for i, tid in enumerate(tids):
+            cluster = int(kmeans.labels_[i])
+            self._labels[tid] = "My Team" if cluster == 0 else "Team 2"
 
-        hsv = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
-        pixels = hsv.reshape(-1, 3).astype(np.float32)
+        n_my = sum(1 for v in self._labels.values() if v == "My Team")
+        n_t2 = sum(1 for v in self._labels.values() if v == "Team 2")
+        print(f"  TeamClassifier: {n_my} My Team, {n_t2} Team 2"
+              f" ({len(tids)} tracks)")
 
-        # Remove background pixels: grass, white lines, shadows
-        filtered = []
-        for h_val, s_val, v_val in pixels:
-            if self._GRASS_H_RANGE[0] <= h_val <= self._GRASS_H_RANGE[1] and s_val > 20 and v_val > 20:
-                continue  # grass
-            if v_val > self._WHITE_V_MIN and s_val < self._WHITE_S_MAX:
-                continue  # white line
-            if v_val < self._DARK_V_MAX:
-                continue  # shadow
-            filtered.append([h_val, s_val, v_val])
+    def get_team(self, track_id):
+        return self._labels.get(track_id, "Unknown")
 
-        if len(filtered) < 20:
-            return None
-
-        filtered = np.array(filtered, dtype=np.float32)
-
-        # Cluster remaining pixels, pick the most colorful cluster as jersey
-        k = min(3, len(filtered))
-        km = KMeans(n_clusters=k, random_state=0, n_init=3, max_iter=10)
-        km.fit(filtered)
-        counts = np.bincount(km.labels_)
-
-        best = -1
-        best_score = -1.0
-        for i in range(k):
-            sat = km.cluster_centers_[i][1]
-            weight = counts[i]
-            # Strongly prefer saturated colors (jersey) over dull ones
-            score = sat * weight * (1.0 if sat >= 30 else 0.1)
-            if score > best_score:
-                best_score = score
-                best = i
-
-        return km.cluster_centers_[best] if best >= 0 else None
-
-    def _assign_team_colours(self):
-        """Set _team_bgr to distinguishable colours based on hue."""
-        hues = [c[0] for c in self.cluster_centers]
-        if hues[0] < hues[1]:
-            self._team_bgr = [(0, 255, 0), (255, 0, 100)]
-        else:
-            self._team_bgr = [(255, 0, 100), (0, 255, 0)]
+    @property
+    def all_labels(self):
+        return dict(self._labels)

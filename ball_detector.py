@@ -1,13 +1,11 @@
-"""Standalone ball detector — YOLO + motion-based white-blob fallback.
-
-Does NOT touch player detection.
+"""Ball detector — YOLO + motion-based white-blob fallback + Kalman smoothing.
 
 Strategy:
-1. Crop to the pitch polygon (remove background noise).
-2. Run YOLO (soccana model) on the crop — catches clear ball views.
-3. When YOLO fails, use frame-differencing + white-blob detection to
-   find small moving white objects (the ball at distance).
-4. Kalman filter for temporal smoothing + gap-filling.
+1. Use the shared YOLODetector's full-frame ball detections (fast path).
+2. When YOLO fails, crop to pitch + upscale and re-run YOLO for small balls.
+3. When that fails, frame-differencing + white-blob detection for distant ball.
+4. Non-green moving blob (catches balls of ANY color).
+5. Kalman filter for temporal smoothing + gap-filling (up to 10 frames).
 """
 
 from collections import deque
@@ -16,76 +14,85 @@ import cv2
 import numpy as np
 
 
-# ---------------------------------------------------------------------------
-# Simple position tracker (replaces Kalman filter — OpenCV Python bindings
-# don't allow statePost modification, and the 8-state model diverges without
-# regular measurements)
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Main detector
-# ---------------------------------------------------------------------------
-
 class BallDetector:
-    """Detects football using YOLO + motion-blob fallback + position tracking."""
+    """Detects football using YOLO + motion-blob fallback + position tracking.
 
-    _stationary_threshold = 15  # pixels (> many frames of goal-line drift)
-    _stationary_frames = 8  # consecutive same-region → reject (allow free kicks)
+    Shares the main YOLO model (no second full-frame inference). For small-ball
+    detection it can optionally run a tiny YOLO on an upscaled pitch crop.
+    """
 
-    def __init__(self, model_path="soccana_yolo11n.pt",
-                 yolo_conf=0.08, trail_length=20,
+    _stationary_threshold = 15   # pixels — if ball stays in a circle this small
+    _stationary_frames = 8       # for this many consecutive frames → reject
+
+    def __init__(self, yolo_detector, trail_length=20,
+                 crop_model_path="soccana_yolo11n.pt",
                  blob_min_radius=2, blob_max_radius=10,
                  upscale_target=1600, max_upscale=4.0,
-                 center_prior=None, kalman_gate_px=300):
-        """center_prior: (cx, cy, radius_px) — before kickoff, reject ball
-        detections far from the pitch center until the ball is found there.
-        kalman_gate_px: reject detections farther than this from last known
-        position (prevents jumping to false positives like penalty spots)."""
-        from ultralytics import YOLO
-        self.yolo = YOLO(model_path)
-        self.yolo_conf = yolo_conf
+                 kalman_gate_px=300):
+        """
+        Args:
+            yolo_detector: Shared YOLODetector instance (full-frame inference).
+            crop_model_path: Optional small YOLO for crop-based ball detection.
+                             None = skip crop YOLO (only use full-frame dets + blobs).
+            upscale_target: When running YOLO on pitch crop, upscale so longest
+                            edge is this many px (better small-ball detection).
+        """
+        self.detector = yolo_detector
+        self.trail = deque(maxlen=trail_length)
+        self._last_pos = None          # last accepted (x, y)
+        self._kf_initialized = False
+        self._gate_px = kalman_gate_px
+        self._missed_count = 0
+        self._seen_positions = {}       # (rounded_x, rounded_y) → count (≥3 blacklisted)
+        self._prev_crop_gray = None
+        self._polygon = None
+        self._crop_roi = None           # (x1, y1, x2, y2) in original frame
+        self._recent_positions = deque(maxlen=10)
+        self._boundary_count = 0
+
+        # Optional crop-based YOLO model for small-ball detection
+        self._crop_yolo = None
         self.blob_min_r = blob_min_radius
         self.blob_max_r = blob_max_radius
         self.upscale_target = upscale_target
         self.max_upscale = max_upscale
-        self.trail = deque(maxlen=trail_length)
-        self._last_pos = None  # (x, y) of last accepted detection
-        self._kf_initialized = False
-        self._center_prior = center_prior  # (cx, cy, radius) or None
-        self._ball_found = False
-        self._gate_px = kalman_gate_px
-        self._missed_count = 0  # consecutive frames without accepted detection
-        self._seen_positions = {}  # (rounded_x, rounded_y) → count (≥4 = blacklisted)
-        self._prev_crop_gray = None
-        self._polygon = None
-        self._crop_roi = None  # (x1, y1, x2, y2) in original frame
-        self._recent_positions = deque(maxlen=10)  # for stationary detection
-        self._center_prior_max_frames = 400  # disable center prior after this many detect() calls
-        self._center_prior_rejects = 0     # count of YOLO detections rejected by center prior
-        self._boundary_count = 0           # consecutive detections near polygon edge
-        self._detect_call_count = 0
-        self._debug_log = False
-        self._hsv_crop = None  # cached HSV for fallback
+        if crop_model_path:
+            try:
+                from ultralytics import YOLO
+                self._crop_yolo = YOLO(crop_model_path)
+                print(f"  BallDetector: crop YOLO model loaded ({crop_model_path})")
+            except Exception as e:
+                print(f"  BallDetector: crop YOLO unavailable ({e})")
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def detect(self, frame, polygon=None, frame_idx=0):
-        """Detect ball. Returns (cx, cy, confidence) or None."""
+    def detect(self, frame, polygon=None, frame_idx=0, yolo_ball_xy=None):
+        """Detect ball position.
+
+        Args:
+            frame: BGR frame.
+            polygon: Pitch polygon for filtering.
+            frame_idx: Current frame number.
+            yolo_ball_xy: Optional (cx, cy, conf) from full-frame YOLO.
+                          If provided and valid, skip the expensive fallback pipeline.
+
+        Returns: (cx, cy, confidence) or None.
+        """
         if polygon is not None:
             self._polygon = polygon
 
-        # Center prior timeout: if ball never spotted at center, disable
-        self._detect_call_count += 1
-        if self._center_prior is not None and not self._ball_found:
-            if self._detect_call_count > self._center_prior_max_frames:
-                if self._debug_log:
-                    print(f"  [BD] f{frame_idx} center prior timeout after {self._center_prior_max_frames} frames")
-                self._center_prior = None
+        # Step 0 — full-frame YOLO ball detections are the fast path.
+        # If the shared detector already found a ball, validate and use it.
+        if yolo_ball_xy is not None:
+            cx, cy, conf = yolo_ball_xy
+            accepted = self._accept_ball(cx, cy, conf, source="yolo")
+            if accepted is not None:
+                return accepted
+            # YOLO ball rejected by filters — fall through to crop/blob pipeline
 
-        # Step 1 — crop to pitch
+        # Step 1 — crop to pitch for focused ball search
         if self._polygon is not None:
             crop_frame, roi = self._crop_to_pitch(frame)
         else:
@@ -94,153 +101,66 @@ class BallDetector:
 
         if crop_frame is None or crop_frame.size == 0:
             kf_pred = self._predict_kf()
-            if kf_pred:
+            if kf_pred is not None:
                 self.trail.append((kf_pred[0], kf_pred[1]))
             return kf_pred
 
-        # Compute gray once for motion analysis across both methods
         gray = cv2.cvtColor(crop_frame, cv2.COLOR_BGR2GRAY)
-
-        # Get Kalman prediction ONCE for this frame (advance state)
         kf_pred = self._predict_kf() if self._kf_initialized else None
 
-        # Helper: accept a detection if it passes all filters
-        def _accept(cx, cy, conf, source=""):
-            # 1 — Must be inside pitch polygon
-            boundary_dist = float('inf')
-            if self._polygon is not None:
-                boundary_dist = cv2.pointPolygonTest(
-                    self._polygon.astype(np.float32), (float(cx), float(cy)), True)
-                if boundary_dist < -10:
-                    if self._debug_log:
-                        print(f"  [BD] f{frame_idx} ← POLYGON reject (dist={boundary_dist:.0f}) {source} ({cx:.0f},{cy:.0f})")
-                    return None
-                # 1b — Boundary line false-positive filter: reject detections sitting
-                #     on the pitch edge (likely white line). YOLO detections near the
-                #     boundary can be real (ball near goal line), but blob detections
-                #     on the boundary are almost always the white pitch line.
-                if boundary_dist < 10:
-                    if source == "yolo" and conf >= 0.5:
-                        pass  # high-confidence YOLO near boundary is OK
-                    else:
-                        if self._debug_log:
-                            print(f"  [BD] f{frame_idx} ← BOUNDARY reject (dist={boundary_dist:.0f}) {source} ({cx:.0f},{cy:.0f})")
-                        return None
-            # 2 — Before kickoff: only accept ball near center spot.
-            #     If a YOLO detection (high-confidence) is rejected by center
-            #     prior several times, it means the game is already in progress
-            #     and the ball isn't at center — disable the filter.
-            if self._center_prior is not None and not self._ball_found:
-                pcx, pcy, radius = self._center_prior
-                d_sq = (cx - pcx) ** 2 + (cy - pcy) ** 2
-                if d_sq > radius * radius:
-                    if source == "yolo" and conf >= 0.3:
-                        self._center_prior_rejects += 1
-                        if self._center_prior_rejects >= 3:
-                            if self._debug_log:
-                                print(f"  [BD] f{frame_idx} center prior disabled ({self._center_prior_rejects} yolo rejects)")
-                            self._center_prior = None
-                            self._ball_found = True  # ball is in play somewhere
-                            return _accept(cx, cy, conf, source)  # re-check without center prior
-                    if self._debug_log:
-                        print(f"  [BD] f{frame_idx} ← CENTER reject (d={np.sqrt(d_sq):.0f}px > r={radius}) {source} ({cx:.0f},{cy:.0f})")
-                    return None
-                self._ball_found = True
-            # 3 — Hard Kalman gate: reject detections far from tracked position.
-            if self._kf_initialized and kf_pred is not None:
-                dx = cx - kf_pred[0]
-                dy = cy - kf_pred[1]
-                d_sq = dx * dx + dy * dy
-                if d_sq > self._gate_px * self._gate_px:
-                    if self._debug_log:
-                        print(f"  [BD] f{frame_idx} ← GATE reject: kf=({kf_pred[0]:.0f},{kf_pred[1]:.0f}) det=({cx:.0f},{cy:.0f}) d={np.sqrt(d_sq):.0f}px {source}")
-                    return None
-            # 4 — Secondary blacklist: positions seen ≥5 times total.
-            #     Catches persistent false positives (penalty spots) that
-            #     might slip through the Kalman gate after a KF reset.
-            rounded = (round(cx / 10) * 10, round(cy / 10) * 10)
-            self._seen_positions[rounded] = self._seen_positions.get(rounded, 0) + 1
-            if self._seen_positions[rounded] >= 3:
-                if self._debug_log:
-                    print(f"  [BD] f{frame_idx} ← BLACKLIST reject (seen={self._seen_positions[rounded]}) {source} ({cx:.0f},{cy:.0f})")
-                return None
-            # 5 — Reject stationary detections (ball must move in a match)
-            if self._is_stationary(cx, cy):
-                if self._debug_log:
-                    print(f"  [BD] f{frame_idx} ← STATIONARY reject {source} ({cx:.0f},{cy:.0f})")
-                return None
-            self._missed_count = 0
-            self._correct_kalman(cx, cy)
-            self.trail.append((cx, cy))
-            self._recent_positions.append((cx, cy))
-            # Track consecutive boundary detections — if stuck on a line, reset
-            if self._polygon is not None and boundary_dist < 20:
-                self._boundary_count += 1
-                if self._boundary_count > 30:
-                    if self._debug_log:
-                        print(f"  [BD] f{frame_idx} ← BOUNDARY_STUCK ({self._boundary_count} frames, resetting)")
-                    self._missed_count = 15
-                    self._kf_initialized = False
-                    self._boundary_count = 0
-                    return None
-            else:
-                self._boundary_count = 0
-            if self._debug_log:
-                print(f"  [BD] f{frame_idx} ✓ ACCEPT ({cx:.0f},{cy:.0f}) conf={conf:.3f} {source}")
-            return (float(cx), float(cy), float(conf))
+        # Step 2 — YOLO on upscaled pitch crop (better for distant small ball)
+        if self._crop_yolo is not None:
+            result = self._detect_yolo_on_crop(crop_frame, gray)
+            if result is not None:
+                cx, cy, conf = self._map_to_original(result[0], result[1], result[2], roi)
+                accepted = self._accept_ball(cx, cy, conf, source="yolo_crop", kf_pred=kf_pred)
+                if accepted is not None:
+                    self._prev_crop_gray = gray
+                    return accepted
 
-        # Step 2 — try YOLO on the crop
-        result = self._detect_yolo(crop_frame, gray)
-        if result is not None:
-            cx, cy, conf = self._map_to_original(result[0], result[1], result[2], roi)
-            accepted = _accept(cx, cy, conf, source="yolo")
-            if accepted:
-                self._prev_crop_gray = gray
-                return accepted
-
-        # Step 3 — Kalman-guided blob search (sensitive search near prediction)
+        # Step 3 — Kalman-guided blob search (sensitive, near prediction)
         if kf_pred is not None:
             result = self._detect_near_prediction(crop_frame, gray, roi, kf_pred)
             if result is not None:
                 cx, cy, conf = self._map_to_original(result[0], result[1], result[2], roi)
-                accepted = _accept(cx, cy, conf, source="blob_near")
-                if accepted:
+                accepted = self._accept_ball(cx, cy, conf, source="blob_near", kf_pred=kf_pred)
+                if accepted is not None:
                     self._prev_crop_gray = gray
                     return accepted
 
-        # Step 4 — wide white-blob search (fallback, no Kalman guidance)
+        # Step 4 — wide white-blob search (no Kalman guidance)
         result = self._detect_motion_blob(crop_frame, gray)
         if result is not None:
             cx, cy, conf = self._map_to_original(result[0], result[1], result[2], roi)
-            accepted = _accept(cx, cy, conf, source="blob_wide")
-            if accepted:
+            accepted = self._accept_ball(cx, cy, conf, source="blob_wide", kf_pred=kf_pred)
+            if accepted is not None:
                 self._prev_crop_gray = gray
                 return accepted
 
-        # Step 4b — non-green moving blob (catches balls of ANY color, not just white)
+        # Step 5 — non-green moving blob (balls of ANY color)
         result = self._detect_motion_any_color(crop_frame, gray)
         if result is not None:
             cx, cy, conf = self._map_to_original(result[0], result[1], result[2], roi)
-            accepted = _accept(cx, cy, conf, source="blob_anycolor")
-            if accepted:
+            accepted = self._accept_ball(cx, cy, conf, source="blob_anycolor", kf_pred=kf_pred)
+            if accepted is not None:
                 self._prev_crop_gray = gray
                 return accepted
 
         self._prev_crop_gray = gray
-        # Step 5 — use KF prediction or reset
+
+        # Step 7 — Kalman prediction for gap-filling
         self._missed_count += 1
         if self._missed_count < 10 and kf_pred is not None:
             px, py = kf_pred[0], kf_pred[1]
-            # Only return KF prediction if it's on or near the pitch
             if self._polygon is not None:
                 pt_test = cv2.pointPolygonTest(
                     self._polygon.astype(np.float32), (float(px), float(py)), True)
                 if pt_test < -200:
-                    self._missed_count = 15  # force reset next frame
+                    self._missed_count = 15
                     return None
             self.trail.append((px, py))
             return (px, py, 0.0)
-        # Lost tracking for too long — reset KF so fresh detections can reacquire
+
         if self._missed_count >= 10:
             self._kf_initialized = False
         return None
@@ -250,18 +170,83 @@ class BallDetector:
         self._kf_initialized = False
         self._prev_crop_gray = None
         self.trail.clear()
-        self._ball_found = False
         self._missed_count = 0
         self._boundary_count = 0
         self._seen_positions.clear()
-        self._detect_call_count = 0
 
     # ------------------------------------------------------------------
-    # Steps
+    # Ball acceptance gate — shared across all detection strategies
     # ------------------------------------------------------------------
+
+    def _accept_ball(self, cx, cy, conf, source="", kf_pred=None):
+        """Validate a ball candidate through all rejection filters.
+
+        Returns (cx, cy, conf) if accepted, None if rejected.
+        """
+        # 1 — Inside pitch polygon
+        if self._polygon is not None:
+            dist = cv2.pointPolygonTest(
+                self._polygon.astype(np.float32), (float(cx), float(cy)), True)
+            if dist < -10:
+                return None
+            # Boundary filter: near-edge detections need high conf
+            if dist < 10 and not (source == "yolo" and conf >= 0.5):
+                return None
+
+        # 2 — Kalman gate: reject detections far from last known position
+        if self._kf_initialized and kf_pred is not None:
+            dx = cx - kf_pred[0]
+            dy = cy - kf_pred[1]
+            if dx * dx + dy * dy > self._gate_px * self._gate_px:
+                return None
+
+        # 3 — Position blacklist: persistent false positives
+        rounded = (round(cx / 10) * 10, round(cy / 10) * 10)
+        self._seen_positions[rounded] = self._seen_positions.get(rounded, 0) + 1
+        if self._seen_positions[rounded] >= 3:
+            return None
+
+        # 4 — Stationary rejection
+        if self._is_stationary(cx, cy):
+            return None
+
+        # — Accepted —
+        self._missed_count = 0
+        self._correct_kalman(cx, cy)
+        self.trail.append((cx, cy))
+        self._recent_positions.append((cx, cy))
+
+        # Boundary stuck detection
+        if self._polygon is not None:
+            bdist = cv2.pointPolygonTest(
+                self._polygon.astype(np.float32), (float(cx), float(cy)), True)
+            if bdist < 20:
+                self._boundary_count += 1
+                if self._boundary_count > 30:
+                    self._missed_count = 15
+                    self._kf_initialized = False
+                    self._boundary_count = 0
+                    return None
+            else:
+                self._boundary_count = 0
+
+        return (float(cx), float(cy), float(conf))
+
+    # ------------------------------------------------------------------
+    # Detection strategies
+    # ------------------------------------------------------------------
+
+    def _check_fullframe_yolo(self):
+        """Get ball detections from the shared YOLODetector (already run per frame)."""
+        # The shared YOLO already ran; we can't re-query it cheaply.
+        # Instead, the caller (process.py) passes ball_xy from the shared YOLO.
+        # This hook is here so BallDetector CAN re-check if needed, but in the
+        # normal flow BallDetector.detect() is called AFTER the YOLO detections
+        # have been checked in process.py. We keep this for the standalone path.
+        return None  # handled externally in the two-pass flow
 
     def _crop_to_pitch(self, frame):
-        """Return (crop, (x1, y1, x2, y2) in original coords)."""
+        """Return (crop_region, (x1, y1, x2, y2)) in original frame coords."""
         poly = self._polygon.astype(np.int32)
         x, y, w, h = cv2.boundingRect(poly)
         margin_x, margin_y = int(w * 0.15), int(h * 0.15)
@@ -271,25 +256,21 @@ class BallDetector:
         y2 = min(frame.shape[0], y + h + margin_y)
         return frame[y1:y2, x1:x2].copy(), (x1, y1, x2, y2)
 
-    def _detect_yolo(self, crop, gray):
-        """YOLO on crop (upscaled when small, full-res otherwise).
-        Returns (cx, cy, confidence) in crop coords or None."""
+    def _detect_yolo_on_crop(self, crop, gray):
+        """Run the small YOLO model on an upscaled pitch crop."""
         h, w = crop.shape[:2]
-
-        # If crop is smaller than target, upscale it (gives YOLO more pixels on the ball)
         long_side = max(h, w)
         scale = min(self.upscale_target / long_side, self.max_upscale)
+
         if scale > 1.0:
             new_w, new_h = int(w * scale), int(h * scale)
             inference_img = cv2.resize(crop, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
-            did_resize = True
         else:
             inference_img = crop
             scale = 1.0
-            did_resize = False
 
-        results = self.yolo(inference_img, conf=self.yolo_conf, verbose=False,
-                            imgsz=max(inference_img.shape[:2]))
+        results = self._crop_yolo(inference_img, conf=0.08, verbose=False,
+                                  imgsz=max(inference_img.shape[:2]))
         boxes = results[0].boxes
         if boxes is None or len(boxes) == 0:
             return None
@@ -302,47 +283,40 @@ class BallDetector:
         if len(ball_idx) == 0:
             return None
 
-        inv = 1.0 / scale if did_resize else 1.0
-
-        # Motion mask to suppress stationary false positives
+        inv = 1.0 / scale
         motion_mask = None
         if self._prev_crop_gray is not None and self._prev_crop_gray.shape == gray.shape:
             diff = cv2.absdiff(gray, self._prev_crop_gray)
             _, motion_mask = cv2.threshold(diff, 10, 255, cv2.THRESH_BINARY)
 
-        # Sort by confidence descending, return first one inside the pitch
         order = np.argsort(confs[ball_idx])[::-1]
         for idx in ball_idx[order]:
             bx1, by1, bx2, by2 = xyxy[idx]
             cx = (bx1 + bx2) / 2.0 * inv
             cy = (by1 + by2) / 2.0 * inv
 
-            # Check if detection is inside the pitch polygon
+            # Inside pitch polygon?
             x1, y1, _, _ = self._crop_roi
             ox, oy = cx + x1, cy + y1
-            pt = (float(ox), float(oy))
             dist = cv2.pointPolygonTest(
-                self._polygon.astype(np.float32), pt, True)
+                self._polygon.astype(np.float32), (float(ox), float(oy)), True)
             if dist < -10:
                 continue
 
-            # Reject stationary false positives (line markings, etc.)
+            # Motion check — reject stationary false positives
             if motion_mask is not None:
                 mc_x, mc_y = int(cx), int(cy)
                 if 0 <= mc_x < motion_mask.shape[1] and 0 <= mc_y < motion_mask.shape[0]:
-                    y_min = max(0, mc_y - 4)
-                    y_max = min(motion_mask.shape[0], mc_y + 5)
-                    x_min = max(0, mc_x - 4)
-                    x_max = min(motion_mask.shape[1], mc_x + 5)
-                    window = motion_mask[y_min:y_max, x_min:x_max]
-                    motion_pixels = cv2.countNonZero(window)
-                    window_area = window.shape[0] * window.shape[1]
-                    if motion_pixels < 0.05 * window_area and confs[idx] < 0.4:
+                    ymn = max(0, mc_y - 4)
+                    ymx = min(motion_mask.shape[0], mc_y + 5)
+                    xmn = max(0, mc_x - 4)
+                    xmx = min(motion_mask.shape[1], mc_x + 5)
+                    window = motion_mask[ymn:ymx, xmn:xmx]
+                    motion_px = cv2.countNonZero(window)
+                    area = window.shape[0] * window.shape[1]
+                    if motion_px < 0.05 * area and confs[idx] < 0.4:
                         continue
 
-            # Reject detections stuck at the same position (goal line, etc.)
-            # Convert to original coords for comparison with _accept's entries
-            ox, oy = cx + self._crop_roi[0], cy + self._crop_roi[1]
             if self._is_stationary(ox, oy):
                 continue
 
@@ -352,18 +326,13 @@ class BallDetector:
 
     def _detect_motion_blob(self, crop, gray):
         """Frame-differencing + white blob detection over full crop."""
-        # Motion mask: |current - previous|
         motion = None
         if self._prev_crop_gray is not None and self._prev_crop_gray.shape == gray.shape:
             diff = cv2.absdiff(gray, self._prev_crop_gray)
             _, motion = cv2.threshold(diff, 10, 255, cv2.THRESH_BINARY)
-            # Dilate to connect nearby regions
             motion = cv2.dilate(motion, np.ones((3, 3), np.uint8), iterations=2)
 
-        # White regions in pitch area — generous to catch distant ball
         _, white = cv2.threshold(gray, 170, 255, cv2.THRESH_BINARY)
-
-        # Combine: moving white pixels
         if motion is not None:
             moving_white = cv2.bitwise_and(white, motion)
         else:
@@ -372,13 +341,7 @@ class BallDetector:
         return self._find_best_blob(moving_white)
 
     def _detect_motion_any_color(self, crop, gray):
-        """Frame-differencing + any non-green moving blob (ball of any color).
-
-        This catches balls that aren't white (orange, yellow, fluorescent, etc.)
-        by excluding grass, white lines, and shadows — anything left that's moving
-        and ball-sized is likely the ball.
-        """
-        # Motion mask
+        """Frame-differencing + any non-green moving blob (ball of any color)."""
         motion = None
         if self._prev_crop_gray is not None and self._prev_crop_gray.shape == gray.shape:
             diff = cv2.absdiff(gray, self._prev_crop_gray)
@@ -388,224 +351,162 @@ class BallDetector:
         if motion is None:
             return None
 
-        # HSV for grass/color filtering
         hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
 
-        # Mask out grass (green hue range)
+        # Mask out grass, white lines, and shadows
         grass_mask = cv2.inRange(hsv, (35, 30, 30), (85, 255, 180))
-
-        # Mask out white lines (low saturation, high value)
         white_mask = cv2.inRange(hsv, (0, 0, 190), (180, 35, 255))
-
-        # Mask out shadows/dark areas
         dark_mask = cv2.inRange(hsv, (0, 0, 0), (180, 255, 35))
 
-        # Non-grass, non-white, non-dark = potential ball
         non_grass = cv2.bitwise_not(grass_mask)
         non_white = cv2.bitwise_not(white_mask)
         non_dark = cv2.bitwise_not(dark_mask)
         candidate = cv2.bitwise_and(non_grass, non_white)
         candidate = cv2.bitwise_and(candidate, non_dark)
-
-        # Only moving candidates
         moving_candidate = cv2.bitwise_and(candidate, motion)
 
-        # Morphological cleanup
         moving_candidate = cv2.erode(moving_candidate, np.ones((2, 2), np.uint8), iterations=1)
         moving_candidate = cv2.dilate(moving_candidate, np.ones((3, 3), np.uint8), iterations=1)
 
         return self._find_best_blob_generous(moving_candidate)
 
-    def _find_best_blob_generous(self, binary_mask):
-        """Find the best blob — wider size range, lower circularity threshold."""
-        contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL,
-                                        cv2.CHAIN_APPROX_SIMPLE)
-        best = None
-        best_score = 0
-
-        for cnt in contours:
-            area = cv2.contourArea(cnt)
-            if area < 2 or area > 500:  # very generous range
-                continue
-
-            center, radius = cv2.minEnclosingCircle(cnt)
-            cx_c, cy_c = center
-            if radius < 1.5 or radius > 14:
-                continue
-
-            perimeter = cv2.arcLength(cnt, True)
-            if perimeter == 0:
-                continue
-            circularity = 4 * np.pi * area / (perimeter * perimeter)
-
-            # Score: prefer circular, medium-size blobs
-            size_score = min(area / 30.0, 1.0) if area < 80 else max(0, 1.0 - (area - 80) / 400.0)
-            score = circularity * size_score * (1 + radius / 10)
-
-            if score > best_score:
-                best_score = score
-                best = (float(cx_c), float(cy_c),
-                        min(0.7, score / 20.0))  # cap confidence at 0.7
-
-        return best
-
     def _detect_near_prediction(self, crop, gray, roi, kf_pred):
-        """Search a window around the Kalman prediction for the ball.
-        Uses more sensitive thresholds (lower white threshold, accepts
-        smaller/larger blobs) since we're searching near where the ball should be."""
+        """Search a window around the Kalman prediction with sensitive thresholds."""
         px, py = kf_pred[0], kf_pred[1]
-
-        # Clamp prediction to within the pitch polygon
         if self._polygon is not None:
-            pt = (float(px), float(py))
             dist = cv2.pointPolygonTest(
-                self._polygon.astype(np.float32), pt, True)
+                self._polygon.astype(np.float32), (float(px), float(py)), True)
             if dist < -20:
-                return None  # prediction way outside pitch, don't bother
+                return None
 
-        # Convert to crop coords
         x1, y1, _, _ = roi
         pcx, pcy = px - x1, py - y1
-
-        # Motion + white in a search window around the prediction
         h, w = crop.shape[:2]
-        window_size = 60  # search 60px around predicted position
-        x_min = max(0, int(pcx) - window_size)
-        x_max = min(w, int(pcx) + window_size)
-        y_min = max(0, int(pcy) - window_size)
-        y_max = min(h, int(pcy) + window_size)
+        win = 60
+        x_min = max(0, int(pcx) - win)
+        x_max = min(w, int(pcx) + win)
+        y_min = max(0, int(pcy) - win)
+        y_max = min(h, int(pcy) + win)
 
         if x_max - x_min < 10 or y_max - y_min < 10:
             return None
 
         window_gray = gray[y_min:y_max, x_min:x_max]
-
-        # Motion in window
         motion = None
         if self._prev_crop_gray is not None:
-            prev_window = self._prev_crop_gray[y_min:y_max, x_min:x_max]
-            if prev_window.shape == window_gray.shape:
-                diff = cv2.absdiff(window_gray, prev_window)
-                _, motion = cv2.threshold(diff, 10, 255, cv2.THRESH_BINARY)  # lower motion threshold
+            prev_win = self._prev_crop_gray[y_min:y_max, x_min:x_max]
+            if prev_win.shape == window_gray.shape:
+                diff = cv2.absdiff(window_gray, prev_win)
+                _, motion = cv2.threshold(diff, 10, 255, cv2.THRESH_BINARY)
                 motion = cv2.dilate(motion, np.ones((3, 3), np.uint8), iterations=1)
 
-        # More generous white threshold in search window
         _, white = cv2.threshold(window_gray, 150, 255, cv2.THRESH_BINARY)
+        search_mask = cv2.bitwise_and(white, motion) if motion is not None else white
 
-        if motion is not None:
-            search_mask = cv2.bitwise_and(white, motion)
-        else:
-            search_mask = white
-
-        # Find blobs, but only in the window
         contours, _ = cv2.findContours(search_mask, cv2.RETR_EXTERNAL,
                                         cv2.CHAIN_APPROX_SIMPLE)
-
         best = None
         best_score = 0
-
-        for cnt in contours:
-            area = cv2.contourArea(cnt)
-            if area < 2 or area > 400:  # wider range
-                continue
-
-            center, radius = cv2.minEnclosingCircle(cnt)
-            cx_c, cy_c = center
-            if radius < 1.5 or radius > 15:
-                continue
-
-            # Weaker circularity check
-            perimeter = cv2.arcLength(cnt, True)
-            if perimeter == 0:
-                continue
-            circularity = 4 * np.pi * area / (perimeter * perimeter)
-
-            # Score: proximity to prediction + circularity + size
-            dist_from_pred = np.sqrt((cx_c + x_min - pcx) ** 2 + (cy_c + y_min - pcy) ** 2)
-            proximity = max(0, 1.0 - dist_from_pred / window_size)
-            score = circularity * area * (0.5 + 0.5 * proximity)
-
-            if score > best_score:
-                best_score = score
-                # Map back to crop coords
-                abs_cx = cx_c + x_min
-                abs_cy = cy_c + y_min
-                conf = min(1.0, score / 30.0) * 0.8  # reduced confidence for guided mode
-                best = (float(abs_cx), float(abs_cy), conf)
-
-        return best
-
-    def _find_best_blob(self, binary_mask):
-        """Find the best white blob in a binary mask."""
-        contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL,
-                                        cv2.CHAIN_APPROX_SIMPLE)
-        best = None
-        best_score = 0
-
         for cnt in contours:
             area = cv2.contourArea(cnt)
             if area < 2 or area > 400:
                 continue
-
             center, radius = cv2.minEnclosingCircle(cnt)
-            cx_c, cy_c = center
+            if radius < 1.5 or radius > 15:
+                continue
+            perimeter = cv2.arcLength(cnt, True)
+            if perimeter == 0:
+                continue
+            circularity = 4 * np.pi * area / (perimeter * perimeter)
+            dist_from_pred = np.sqrt((center[0] + x_min - pcx) ** 2 +
+                                     (center[1] + y_min - pcy) ** 2)
+            proximity = max(0, 1.0 - dist_from_pred / win)
+            score = circularity * area * (0.5 + 0.5 * proximity)
+            if score > best_score:
+                best_score = score
+                best = (float(center[0] + x_min), float(center[1] + y_min),
+                        min(1.0, score / 30.0) * 0.8)
+        return best
+
+    def _find_best_blob(self, binary_mask):
+        """Find best white blob by circularity × size."""
+        contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL,
+                                        cv2.CHAIN_APPROX_SIMPLE)
+        best = None
+        best_score = 0
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area < 2 or area > 400:
+                continue
+            center, radius = cv2.minEnclosingCircle(cnt)
             if radius < self.blob_min_r or radius > self.blob_max_r:
                 continue
-
-            # Circularity check
             perimeter = cv2.arcLength(cnt, True)
             if perimeter == 0:
                 continue
             circularity = 4 * np.pi * area / (perimeter * perimeter)
             if circularity < 0.3:
                 continue
-
-            # Score: bigger + more circular = better
             score = circularity * area
             if score > best_score:
                 best_score = score
-                best = (float(cx_c), float(cy_c),
+                best = (float(center[0]), float(center[1]),
                         min(1.0, score / 50.0))
-
         return best
 
-    def _map_to_original(self, cx_crop, cy_crop, conf, roi):
-        """Map crop coords to original frame coords."""
+    def _find_best_blob_generous(self, binary_mask):
+        """Find best blob with wider size range, lower circularity threshold."""
+        contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL,
+                                        cv2.CHAIN_APPROX_SIMPLE)
+        best = None
+        best_score = 0
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area < 2 or area > 500:
+                continue
+            center, radius = cv2.minEnclosingCircle(cnt)
+            if radius < 1.5 or radius > 14:
+                continue
+            perimeter = cv2.arcLength(cnt, True)
+            if perimeter == 0:
+                continue
+            circularity = 4 * np.pi * area / (perimeter * perimeter)
+            size_score = min(area / 30.0, 1.0) if area < 80 else max(0, 1.0 - (area - 80) / 400.0)
+            score = circularity * size_score * (1 + radius / 10)
+            if score > best_score:
+                best_score = score
+                best = (float(center[0]), float(center[1]),
+                        min(0.7, score / 20.0))
+        return best
+
+    @staticmethod
+    def _map_to_original(cx_crop, cy_crop, conf, roi):
         x1, y1, _, _ = roi
         return (cx_crop + x1, cy_crop + y1, conf)
 
     # ------------------------------------------------------------------
-    # Stationary detection filter
+    # Stationary detection
     # ------------------------------------------------------------------
 
     def _is_stationary(self, cx, cy):
-        """Check if (cx, cy) is suspiciously similar to recent detections.
-        The ball should move; stationary detections are likely false positives
-        (goal line, corner flags, etc.)."""
         if len(self._recent_positions) < self._stationary_frames:
             return False
         recent = list(self._recent_positions)[-self._stationary_frames:]
-        close_count = sum(
-            1 for x, y in recent
-            if abs(x - cx) < self._stationary_threshold
-            and abs(y - cy) < self._stationary_threshold
-        )
-        return close_count == len(recent)  # all recent positions are close
+        close = sum(1 for x, y in recent
+                    if abs(x - cx) < self._stationary_threshold
+                    and abs(y - cy) < self._stationary_threshold)
+        return close == len(recent)
 
     # ------------------------------------------------------------------
-    # Kalman
+    # Kalman (position smoother — avoids broken OpenCV KF Python bindings)
     # ------------------------------------------------------------------
 
     def _correct_kalman(self, cx, cy):
-        """Store latest ball position (replaces broken OpenCV KF)."""
         self._last_pos = (float(cx), float(cy))
         if not self._kf_initialized:
             self._kf_initialized = True
 
     def _predict_kf(self):
-        """Return last known ball position (no velocity extrapolation — prevents
-        runaway position when ball isn't detected for several frames)."""
         if not self._kf_initialized or self._last_pos is None:
             return None
         return (self._last_pos[0], self._last_pos[1], 0.0)
-

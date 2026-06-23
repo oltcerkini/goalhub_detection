@@ -143,10 +143,9 @@ async def start_processing(data: dict):
     """Start processing a video in the background."""
     video_id = data.get("video_id")
     video_name = data.get("video_name")
-    threshold = data.get("threshold", 0.20)
+    threshold = data.get("threshold", 0.2)
     skip = data.get("skip", 3)
-    resize = data.get("resize", 2560)
-    model = data.get("model", "medium")
+    model = data.get("model", None)
     team_tracks = data.get("team_tracks", "")
 
     if not video_id or not video_name:
@@ -174,13 +173,13 @@ async def start_processing(data: dict):
 
     # Launch processing in background
     _launch_processing(task_id, str(video_path), str(cal_path), str(output_path),
-                       threshold, skip, resize, model, team_tracks)
+                       threshold, skip, model, team_tracks)
 
     return {"task_id": task_id}
 
 
 def _launch_processing(task_id, video_path, cal_path, output_path,
-                       threshold, skip, resize, model, team_tracks):
+                       threshold, skip, model, team_tracks):
     """Run process.py as a subprocess with the given arguments."""
     cmd = [
         sys.executable, str(BASE_DIR / "process.py"),
@@ -188,10 +187,11 @@ def _launch_processing(task_id, video_path, cal_path, output_path,
         "--calibration", cal_path,
         "--threshold", str(threshold),
         "--skip", str(skip),
-        "--resize", str(resize),
-        "--model", model,
+        "--gamma", "0.85",
         "--output-dir", str(OUTPUT_DIR),
     ]
+    if model:
+        cmd.extend(["--model", model])
     if team_tracks:
         cmd.extend(["--team-tracks", team_tracks])
 
@@ -274,6 +274,13 @@ async def get_results(task_id: str):
             data["player_names"] = json.load(f)
     else:
         data["player_names"] = {}
+
+    # Convert heatmap path to URL
+    hmap = data.get("heatmap")
+    if hmap and Path(hmap).exists():
+        data["heatmap_url"] = f"/api/media/{Path(hmap).name}"
+    else:
+        data["heatmap_url"] = None
 
     return data
 
