@@ -75,7 +75,7 @@ class YOLODetector:
         """
         results = self.yolo(
             image, conf=conf or self.conf, iou=self.iou,
-            imgsz=self.imgsz, verbose=False,
+            imgsz=min(self.imgsz, max(image.shape[0], image.shape[1])), verbose=False,
         )
         boxes = results[0].boxes
         if boxes is None or len(boxes) == 0:
@@ -115,7 +115,7 @@ class YOLODetector:
         """
         results = self.yolo(
             image, conf=0.05, iou=self.iou,
-            imgsz=self.imgsz, verbose=False,
+            imgsz=min(self.imgsz, max(image.shape[0], image.shape[1])), verbose=False,
         )
         boxes = results[0].boxes
         if boxes is None or len(boxes) == 0:

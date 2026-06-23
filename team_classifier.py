@@ -1,11 +1,13 @@
 """Team classifier — clusters players into exactly 2 teams by jersey colour.
 
-KMeans on weighted HSV samples from player torso.
-Always produces exactly 2 teams: 'My Team' and 'Team 2'.
+Frame-by-frame KMeans with majority voting across the entire video.
+Each frame votes independently; final team = majority decision across all frames.
+This makes the classification robust to lighting variations — a few badly-lit
+frames get outvoted by the rest.
 """
 
 import numpy as np
-from collections import defaultdict
+from collections import defaultdict, Counter
 from sklearn.cluster import KMeans
 
 
@@ -19,14 +21,19 @@ class TeamClassifier:
         self.sample_every = sample_every
         self.torso_ratio = torso_ratio
         self.sat_thresh = sat_threshold
-        self.sample_gamma = sample_gamma  # >1 darkens midtones, making jersey colours pop
-        self._samples = defaultdict(list)
+        self.sample_gamma = sample_gamma
+        # Per-frame storage: frame_idx -> {track_id -> mean_hsv_vector}
+        self._frame_data = {}
         self._labels = {}
-        self._my_team_idx = 0  # cluster index for "My Team" (0 or 1)
+        self._my_team_idx = 0
 
     def sample(self, frame, track_id, bbox, frame_idx):
-        """Sample HSV from the centre torso — gamma-darkened for better colour separation."""
-        if len(self._samples[track_id]) > 0 and frame_idx % self.sample_every != 0:
+        """Sample HSV centre-torso, store per-frame mean for this track."""
+        if frame_idx not in self._frame_data:
+            self._frame_data[frame_idx] = {}
+
+        # Only sample every Nth frame
+        if len(self._frame_data) > 0 and frame_idx % self.sample_every != 0:
             return
 
         x1, y1, x2, y2 = bbox
@@ -36,7 +43,6 @@ class TeamClassifier:
         if x2 <= x1 or y2 <= y1:
             return
 
-        # Torso region (upper body)
         torso_top = y1 + int((y2 - y1) * self.torso_ratio[0])
         torso_bot = y1 + int((y2 - y1) * self.torso_ratio[1])
         if torso_bot <= torso_top:
@@ -47,8 +53,6 @@ class TeamClassifier:
             return
 
         import cv2
-
-        # Darken the torso crop so overexposed jersey colours separate better
         if self.sample_gamma != 1.0:
             inv = 1.0 / self.sample_gamma
             table = np.array([(i / 255.0) ** inv * 255 for i in range(256)], dtype=np.uint8)
@@ -62,7 +66,7 @@ class TeamClassifier:
 
         pixels = crop.reshape(-1, 3).astype(np.float32)
 
-        # Keep only saturated pixels (coloured jersey, not shorts/skin/background)
+        # Filter to saturated pixels only
         mask = pixels[:, 1] > self.sat_thresh
         coloured = pixels[mask]
         if len(coloured) < 5:
@@ -71,43 +75,49 @@ class TeamClassifier:
             idxs = np.random.choice(len(coloured), 100, replace=False)
             coloured = coloured[idxs]
 
-        # Weight: Hue×3, Saturation×1, Value×1 — Hue is the primary colour signal
-        weighted = np.empty_like(coloured)
-        weighted[:, 0] = coloured[:, 0] * 3.0   # Hue
-        weighted[:, 1] = coloured[:, 1] * 1.0   # Saturation
-        weighted[:, 2] = coloured[:, 2] * 1.0   # Value
+        # Store the MEAN colour for this (frame, track) — one vector per frame per track
+        mean_colour = coloured.mean(axis=0)
+        self._frame_data[frame_idx][track_id] = mean_colour
 
-        self._samples[track_id].extend(weighted.tolist())
+    def cluster(self):
+        """Frame-by-frame KMeans, then majority vote across the whole video.
+
+        For each frame with enough players, run 2-cluster KMeans and record
+        which team each player was assigned to. Then each player's final team
+        is the one they were assigned to most often across all frames.
+        """
+        # Group tracks by frame: frame_id -> [(track_id, hsv_vector), ...]
+        frame_votes = defaultdict(list)  # track_id -> [0 or 1 per frame]
+
+        for frame_idx, tracks in self._frame_data.items():
+            tids = list(tracks.keys())
+            feats = np.array([tracks[t] for t in tids], dtype=np.float32)
+
+            if len(tids) < 2:
+                continue
+
+            # Simple weighted: Hue×3 for discrimination
+            weighted = feats.copy()
+            weighted[:, 0] *= 3.0
+
+            kmeans = KMeans(n_clusters=2, random_state=0, n_init=3).fit(weighted)
+            for i, tid in enumerate(tids):
+                frame_votes[tid].append(int(kmeans.labels_[i]))
+
+        # Majority vote across all frames for each track
+        for tid, votes in frame_votes.items():
+            most_common = Counter(votes).most_common(1)[0][0]
+            self._labels[tid] = "My Team" if most_common == self._my_team_idx else "Team 2"
+
+        n_my = sum(1 for v in self._labels.values() if v == "My Team")
+        n_t2 = sum(1 for v in self._labels.values() if v == "Team 2")
+        n_total = len(frame_votes)
+        print(f"  TeamClassifier: {n_my} My Team, {n_t2} Team 2"
+              f" ({n_total} tracks)")
 
     def set_my_team(self, team_index):
         """Set which KMeans cluster (0 or 1) corresponds to 'My Team'."""
         self._my_team_idx = team_index
-
-    def cluster(self):
-        """KMeans with k=2 — always produces exactly 2 teams."""
-        track_feats = {}
-        for tid, samples in self._samples.items():
-            if len(samples) < self.min_samples:
-                continue
-            arr = np.array(samples, dtype=np.float32)
-            track_feats[tid] = arr.mean(axis=0)
-
-        tids = list(track_feats.keys())
-        if len(tids) < 2:
-            print(f"  TeamClassifier: not enough tracks ({len(tids)} < 2)")
-            return
-
-        data = np.array([track_feats[t] for t in tids], dtype=np.float32)
-        kmeans = KMeans(n_clusters=2, random_state=0, n_init=5).fit(data)
-
-        for i, tid in enumerate(tids):
-            c = int(kmeans.labels_[i])
-            self._labels[tid] = "My Team" if c == self._my_team_idx else "Team 2"
-
-        n_my = sum(1 for v in self._labels.values() if v == "My Team")
-        n_t2 = sum(1 for v in self._labels.values() if v == "Team 2")
-        print(f"  TeamClassifier: {n_my} My Team, {n_t2} Team 2"
-              f" ({len(tids)} tracks)")
 
     def get_team(self, track_id):
         return self._labels.get(track_id, "Unknown")

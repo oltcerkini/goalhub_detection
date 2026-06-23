@@ -88,7 +88,7 @@ async def upload_video(file: UploadFile = File(...)):
         f.write(contents)
 
     # Extract first frame
-    frame = _extract_frame(str(video_path), 0)
+    frame = _extract_frame(str(video_path), 30)
     if frame is None:
         video_path.unlink(missing_ok=True)
         raise HTTPException(400, "Could not read video file")
