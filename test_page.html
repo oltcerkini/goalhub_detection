@@ -1,0 +1,1766 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GoalHub — Football Intelligence</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* ── Reset & Base ───────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+
+:root {
+  --bg-deep: #04060c;
+  --bg-primary: #090d17;
+  --bg-secondary: #0d1424;
+  --bg-card: #111a2e;
+  --bg-card-hover: #162240;
+  --bg-elevated: #1a2a48;
+  --border: #1c2d4a;
+  --border-light: #2a4060;
+  --text-primary: #eaf0f8;
+  --text-secondary: #7e95b8;
+  --text-muted: #4d6688;
+  --orange: #ff6b35;
+  --orange-dim: #cc4400;
+  --orange-glow: rgba(255, 107, 53, 0.15);
+  --teal: #00d4aa;
+  --teal-dim: #00997a;
+  --teal-glow: rgba(0, 212, 170, 0.12);
+  --pitch-green: #0a1a10;
+  --pitch-line: #2a5a3a;
+  --gold: #ffc107;
+  --gold-glow: rgba(255, 193, 7, 0.12);
+  --red: #ff4757;
+  --red-dim: #3a1418;
+  --blue-accent: #4dabf7;
+  --radius: 10px;
+  --radius-sm: 6px;
+  --radius-lg: 14px;
+  --shadow: 0 4px 20px rgba(0,0,0,0.5);
+  --shadow-lg: 0 8px 40px rgba(0,0,0,0.7);
+  --transition: 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+body {
+  font-family: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  min-height: 100vh;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Selection ──────────────────────────────────────────────────────── */
+::selection { background: var(--gold); color: var(--bg-primary); }
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--bg-primary); }
+::-webkit-scrollbar-thumb { background: var(--border-light); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* ── Header ─────────────────────────────────────────────────────────── */
+.header {
+  position: sticky; top: 0; z-index: 100;
+  background: rgba(4, 6, 12, 0.9);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-bottom: 1px solid var(--border);
+  padding: 0 32px;
+  display: flex;
+  align-items: center;
+  height: 60px;
+}
+.header-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-decoration: none;
+}
+.header-logo {
+  width: 34px; height: 34px;
+  background: linear-gradient(135deg, var(--orange), var(--gold));
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 800;
+  font-size: 16px;
+  color: var(--bg-deep);
+}
+.header h1 {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+  color: var(--text-primary);
+}
+.header h1 span { color: var(--orange); }
+.header-tagline {
+  display: none;
+}
+.header-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* ── Steps Breadcrumb ───────────────────────────────────────────────── */
+.steps {
+  display: flex;
+  justify-content: center;
+  gap: 4px;
+  padding: 20px 32px 0;
+}
+.step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 20px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: var(--transition);
+  position: relative;
+  user-select: none;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  letter-spacing: 0.2px;
+}
+.step.active {
+  color: #fff;
+  background: var(--orange);
+  border-color: var(--orange);
+  box-shadow: 0 0 20px var(--orange-glow);
+}
+.step.done { color: var(--teal); border-color: var(--teal-dim); }
+.step .num {
+  width: 20px; height: 20px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 700;
+  background: rgba(255,255,255,0.08);
+  transition: var(--transition);
+  flex-shrink: 0;
+}
+.step.active .num { background: rgba(255,255,255,0.2); }
+.step.done .num { background: var(--teal); color: var(--bg-deep); }
+.step-label { white-space: nowrap; }
+
+/* ── Main Container ─────────────────────────────────────────────────── */
+.main {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 28px;
+}
+.panel { display: none; animation: fadeUp 0.35s ease; }
+.panel.active { display: block; }
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Section Headers ────────────────────────────────────────────────── */
+.section-header {
+  text-align: center;
+  margin-bottom: 28px;
+}
+.section-header h2 {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+  color: var(--text-primary);
+}
+.section-header p {
+  color: var(--text-muted);
+  font-size: 13px;
+  margin-top: 4px;
+}
+
+/* ── Upload Zone ────────────────────────────────────────────────────── */
+.upload-zone {
+  border: 1.5px solid var(--border-light);
+  border-radius: var(--radius-lg);
+  padding: 64px 36px;
+  text-align: center;
+  cursor: pointer;
+  transition: var(--transition);
+  background: var(--bg-card);
+  position: relative;
+  overflow: hidden;
+}
+.upload-zone::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse at center, var(--orange-glow) 0%, transparent 70%);
+  opacity: 0;
+  transition: var(--transition);
+}
+.upload-zone:hover::before,
+.upload-zone.dragover::before { opacity: 0.4; }
+.upload-zone:hover, .upload-zone.dragover {
+  border-color: var(--orange);
+  background: var(--bg-card-hover);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow);
+}
+.upload-zone .upload-icon {
+  position: relative;
+  width: 64px; height: 64px;
+  margin: 0 auto 18px;
+  background: var(--bg-elevated);
+  border-radius: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: var(--transition);
+}
+.upload-zone:hover .upload-icon {
+  background: var(--orange-glow);
+  transform: scale(1.05);
+}
+.upload-zone .upload-icon svg { width: 28px; height: 28px; color: var(--text-muted); }
+.upload-zone:hover .upload-icon svg { color: var(--orange); }
+.upload-zone h2 {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+  position: relative;
+}
+.upload-zone p {
+  color: var(--text-muted);
+  font-size: 14px;
+  position: relative;
+}
+.upload-zone input { display: none; }
+.upload-preview { display: none; margin-top: 24px; }
+.upload-preview-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+.upload-preview-card img { width: 100%; max-height: 420px; object-fit: contain; background: #000; display: block; }
+.upload-preview-info {
+  padding: 16px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  border-top: 1px solid var(--border);
+}
+.upload-preview-info .file-info { display: flex; align-items: center; gap: 10px; }
+.upload-preview-info .file-info .file-icon { color: var(--gold); font-size: 20px; }
+.upload-preview-info .file-name { font-weight: 600; font-size: 14px; }
+.upload-preview-info .file-dims { color: var(--text-muted); font-size: 12px; }
+
+/* ── Buttons ────────────────────────────────────────────────────────── */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 9px 20px;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: var(--transition);
+  text-decoration: none;
+  white-space: nowrap;
+  line-height: 1.4;
+  letter-spacing: 0.2px;
+}
+.btn:active { transform: scale(0.97); }
+.btn-primary {
+  background: linear-gradient(135deg, var(--orange), var(--orange-dim));
+  color: #fff;
+  box-shadow: 0 4px 16px var(--orange-glow);
+}
+.btn-primary:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 24px var(--orange-glow);
+}
+.btn-primary:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+  transform: none !important;
+  box-shadow: none !important;
+}
+.btn-secondary {
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+}
+.btn-secondary:hover {
+  background: var(--border-light);
+  color: var(--text-primary);
+  border-color: var(--text-muted);
+}
+.btn-success {
+  background: linear-gradient(135deg, var(--teal), var(--teal-dim));
+  color: #fff;
+}
+.btn-success:hover { transform: translateY(-1px); box-shadow: 0 4px 16px var(--teal-glow); }
+.btn-danger {
+  background: linear-gradient(135deg, var(--red), #c62828);
+  color: #fff;
+}
+.btn-danger:hover { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(255,71,87,0.3); }
+.btn-ghost {
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+.btn-ghost:hover { background: var(--bg-card); color: var(--text-secondary); }
+.btn-sm { padding: 6px 14px; font-size: 11px; border-radius: 5px; }
+.btn-lg { padding: 12px 28px; font-size: 14px; border-radius: var(--radius); }
+.btn-icon {
+  width: 34px; height: 34px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+}
+
+/* ── Calibration ────────────────────────────────────────────────────── */
+.cal-container {
+  display: flex;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+.cal-canvas-wrap {
+  position: relative;
+  flex: 1;
+  min-width: 640px;
+  background: var(--bg-deep);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  padding: 6px;
+}
+.cal-canvas-wrap canvas {
+  width: 100%;
+  display: block;
+  cursor: crosshair;
+  border-radius: var(--radius-sm);
+}
+.cal-sidebar {
+  width: 300px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.cal-sidebar-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 18px;
+}
+.cal-sidebar-card h3 {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--orange);
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.cal-sidebar-card p {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.6;
+}
+.cal-points {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.cal-points li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  background: var(--bg-secondary);
+  border-radius: 5px;
+  border: 1px solid transparent;
+  transition: var(--transition);
+  color: var(--text-muted);
+}
+.cal-points li.done {
+  border-color: var(--border);
+  color: var(--text-primary);
+}
+.cal-points li .dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  border: 1.5px solid transparent;
+}
+.cal-points li.done .dot { border-color: rgba(255,255,255,0.2); }
+.cal-points li .coord {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-family: 'JetBrains Mono', monospace;
+  margin-left: auto;
+  opacity: 0;
+  transition: var(--transition);
+}
+.cal-points li.done .coord { opacity: 1; }
+.cal-points li .check {
+  color: var(--teal);
+  opacity: 0;
+  transition: var(--transition);
+}
+.cal-points li.done .check { opacity: 1; }
+.cal-team-select {
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: var(--transition);
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' fill='%237e95b8' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  padding-right: 28px;
+}
+.cal-team-select:focus { outline: none; border-color: var(--orange); }
+.cal-team-select option { background: var(--bg-secondary); color: var(--text-primary); }
+.cal-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  display: block;
+  margin-bottom: 5px;
+}
+.cal-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+/* ── Process ────────────────────────────────────────────────────────── */
+.proc-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 14px;
+  margin-bottom: 24px;
+}
+.proc-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 18px;
+  text-align: center;
+  transition: var(--transition);
+}
+.proc-card:hover { border-color: var(--border-light); transform: translateY(-1px); }
+.proc-card .val {
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--orange);
+  letter-spacing: -0.3px;
+}
+.proc-card .label {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 3px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.proc-status-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 36px;
+  text-align: center;
+  margin-top: 14px;
+}
+.proc-status-card .spinner {
+  display: inline-block;
+  width: 40px; height: 40px;
+  border: 2.5px solid var(--border-light);
+  border-top-color: var(--orange);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  margin-bottom: 14px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.proc-status-card .msg {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.proc-status-card .sub {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 3px;
+}
+.proc-status-card .progress-wrap {
+  width: 100%;
+  max-width: 360px;
+  height: 5px;
+  background: var(--bg-elevated);
+  border-radius: 3px;
+  overflow: hidden;
+  margin: 14px auto 0;
+}
+.proc-status-card .progress-wrap .fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--orange), var(--gold));
+  border-radius: 3px;
+  width: 0%;
+  transition: width 0.4s ease;
+}
+.proc-debug {
+  background: #050a10;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-top: 16px;
+  max-height: 240px;
+  overflow-y: auto;
+  font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', monospace;
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  display: none;
+}
+
+/* ── Results ────────────────────────────────────────────────────────── */
+.results-section { display: none; }
+.results-section.visible { display: block; }
+
+.results-video-wrap {
+  background: var(--bg-deep);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  margin-bottom: 20px;
+}
+.results-video-wrap video {
+  width: 100%;
+  display: block;
+  max-height: 600px;
+}
+
+/* Stats summary cards */
+.stats-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.stat-summary-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  transition: var(--transition);
+}
+.stat-summary-card:hover { border-color: var(--border-light); transform: translateY(-1px); }
+.stat-summary-card .stat-icon {
+  width: 40px; height: 40px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.stat-summary-card .stat-icon.orange { background: var(--orange-glow); }
+.stat-summary-card .stat-icon.orange svg { color: var(--orange); }
+.stat-summary-card .stat-icon.teal { background: var(--teal-glow); }
+.stat-summary-card .stat-icon.teal svg { color: var(--teal); }
+.stat-summary-card .stat-icon.gold { background: var(--gold-glow); }
+.stat-summary-card .stat-icon.gold svg { color: var(--gold); }
+.stat-summary-card .stat-icon.red { background: rgba(255,71,87,0.12); }
+.stat-summary-card .stat-icon.red svg { color: var(--red); }
+.stat-summary-card .stat-icon.blue { background: rgba(77,171,247,0.12); }
+.stat-summary-card .stat-icon.blue svg { color: var(--blue-accent); }
+.stat-summary-card .stat-info { min-width: 0; }
+.stat-summary-card .stat-num {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+  line-height: 1.2;
+}
+.stat-summary-card .stat-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+/* Tabs */
+.tabs {
+  display: flex;
+  gap: 0;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-card);
+  border-radius: var(--radius) var(--radius) 0 0;
+  padding: 0 14px;
+  overflow-x: auto;
+}
+.tab {
+  padding: 12px 16px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: var(--transition);
+  white-space: nowrap;
+  user-select: none;
+}
+.tab:hover { color: var(--text-secondary); }
+.tab.active { color: var(--orange); border-bottom-color: var(--orange); }
+.tab-content { display: none; animation: fadeUp 0.25s ease; }
+.tab-content.active { display: block; }
+
+/* Tables */
+.table-wrap {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.table-wrap table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.table-wrap thead {
+  background: var(--bg-secondary);
+  position: sticky;
+  top: 0;
+}
+.table-wrap th {
+  padding: 10px 14px;
+  text-align: left;
+  font-weight: 600;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+}
+.table-wrap td {
+  padding: 9px 14px;
+  border-bottom: 1px solid rgba(28, 45, 74, 0.5);
+  color: var(--text-secondary);
+}
+.table-wrap tr:hover td { background: rgba(17, 26, 46, 0.6); }
+.table-wrap tbody tr:last-child td { border-bottom: none; }
+
+.player-name-input {
+  background: transparent;
+  border: none;
+  border-bottom: 1.5px solid var(--border);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: inherit;
+  font-weight: 500;
+  padding: 2px 4px;
+  width: 120px;
+  transition: var(--transition);
+  outline: none;
+}
+.player-name-input:focus { border-bottom-color: var(--orange); }
+.player-name-input.saved { border-bottom-color: var(--teal); }
+
+/* Badge */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+.badge-myteam {
+  background: var(--teal-glow);
+  color: var(--teal);
+}
+.badge-opponent {
+  background: rgba(255,71,87,0.12);
+  color: var(--red);
+}
+.badge-unknown {
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+}
+
+/* Ball trail canvas */
+#ballTrailCanvas {
+  width: 100%;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg-deep);
+}
+
+/* Empty state */
+.empty-state {
+  text-align: center;
+  padding: 48px 20px;
+  color: var(--text-muted);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.empty-state .empty-icon { margin-bottom: 10px; }
+.empty-state h3 { font-size: 16px; font-weight: 600; color: var(--text-secondary); margin-bottom: 3px; }
+.empty-state p { font-size: 13px; }
+
+/* Download bar */
+.download-bar {
+  display: flex;
+  gap: 8px;
+  margin-top: 24px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+/* ── Toast / Notification ───────────────────────────────────────────── */
+.toast {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  padding: 12px 18px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-lg);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  z-index: 200;
+  transform: translateY(80px);
+  opacity: 0;
+  transition: var(--transition);
+  pointer-events: none;
+}
+.toast.show { transform: translateY(0); opacity: 1; pointer-events: auto; }
+.toast.success { border-color: var(--teal); }
+.toast.error { border-color: var(--red); }
+
+/* ── Responsive ─────────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .header { padding: 0 16px; }
+  .steps { padding: 16px 12px 0; overflow-x: auto; justify-content: flex-start; gap: 2px; }
+  .step { padding: 6px 12px; font-size: 11px; }
+  .step-label { display: none; }
+  .step.active .step-label,
+  .step.done .step-label { display: inline; }
+  .main { padding: 14px; }
+  .cal-canvas-wrap { min-width: auto; }
+  .cal-sidebar { width: 100%; }
+  .upload-zone { padding: 40px 20px; }
+  .upload-zone .upload-icon { width: 48px; height: 48px; }
+  .proc-grid { grid-template-columns: repeat(2, 1fr); }
+  .stats-summary { grid-template-columns: repeat(2, 1fr); }
+  .stat-summary-card { padding: 12px; }
+  .stat-summary-card .stat-num { font-size: 18px; }
+}
+</style>
+</head>
+<body>
+
+<!-- ── Toast ─────────────────────────────────────────────────────────── -->
+<div class="toast" id="toast"></div>
+
+<!-- ── Header ────────────────────────────────────────────────────────── -->
+<header class="header">
+  <a class="header-brand" onclick="goStep(1)" style="cursor:pointer">
+    <div class="header-logo">GH</div>
+    <h1>Goal<span>Hub</span></h1>
+  </a>
+  <div class="header-right">
+    <button class="btn btn-ghost btn-sm" onclick="goStep(1)" title="New Analysis">
+      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 8H2M8 2v12"/></svg>
+      New
+    </button>
+  </div>
+</header>
+
+<!-- ── Step Breadcrumbs ─────────────────────────────────────────────── -->
+<div class="steps">
+  <div class="step active" data-step="1">
+    <span class="num">
+      <svg width="12" height="12" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2C7 2 4 4 4 7v6c0 3 3 5 6 5s6-2 6-5V7c0-3-3-5-6-5z"/><circle cx="10" cy="9" r="2"/></svg>
+    </span>
+    <span class="step-label">Upload</span>
+  </div>
+  <div class="step" data-step="2">
+    <span class="num">
+      <svg width="12" height="12" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="8"/><circle cx="10" cy="10" r="3"/><line x1="10" y1="2" x2="10" y2="4"/><line x1="10" y1="16" x2="10" y2="18"/><line x1="2" y1="10" x2="4" y2="10"/><line x1="16" y1="10" x2="18" y2="10"/></svg>
+    </span>
+    <span class="step-label">Calibrate</span>
+  </div>
+  <div class="step" data-step="3">
+    <span class="num">
+      <svg width="12" height="12" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 2v16M15 2v16M2 10h16M2 5h4M2 15h4M14 5h4M14 15h4"/><circle cx="10" cy="10" r="2"/></svg>
+    </span>
+    <span class="step-label">Process</span>
+  </div>
+  <div class="step" data-step="4">
+    <span class="num">
+      <svg width="12" height="12" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2C7 2 4 4 4 7c0 3 2 5 6 9 4-4 6-6 6-9 0-3-3-5-6-5z"/><circle cx="10" cy="7" r="2"/></svg>
+    </span>
+    <span class="step-label">Results</span>
+  </div>
+</div>
+
+<!-- ── Main Content ──────────────────────────────────────────────────── -->
+<div class="main">
+
+  <!-- ═══ Step 1: Upload ═══ -->
+  <div class="panel active" id="panel1">
+    <div class="section-header">
+      <h2>Upload Match Footage</h2>
+      <p>Drag & drop your video or click to browse</p>
+    </div>
+
+    <div class="upload-zone" id="uploadZone">
+      <div class="upload-icon">
+        <svg viewBox="0 0 28 28" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="4" y="3" width="20" height="22" rx="2"/>
+          <line x1="4" y1="9" x2="24" y2="9"/>
+          <line x1="4" y1="15" x2="24" y2="15"/>
+          <line x1="14" y1="3" x2="14" y2="25"/>
+          <circle cx="14" cy="12" r="2"/>
+          <circle cx="14" cy="18" r="2"/>
+          <path d="M10 6l4-3 4 3"/>
+          <path d="M10 22l4 3 4-3"/>
+        </svg>
+      </div>
+      <h2>Choose a video file</h2>
+      <p>MP4, MOV, AVI &bull; Max 500MB</p>
+      <input type="file" id="fileInput" accept="video/*">
+    </div>
+
+    <div class="upload-preview" id="uploadPreview">
+      <div class="upload-preview-card">
+        <img id="previewImage">
+        <div class="upload-preview-info">
+          <div class="file-info">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--orange)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/><line x1="5" y1="5" x2="16" y2="16"/></svg>
+            <span class="file-name" id="fileName"></span>
+            <span class="file-dims" id="fileDims"></span>
+          </div>
+          <button class="btn btn-primary" onclick="goStep(2)">
+            Calibrate Pitch
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3l5 5-5 5"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ Step 2: Calibrate ═══ -->
+  <div class="panel" id="panel2">
+    <div class="section-header">
+      <h2>Calibrate the Pitch</h2>
+      <p>Mark 4 corners, then 2 posts for left goal, then 2 posts for right goal</p>
+    </div>
+
+    <div class="cal-container">
+      <div class="cal-canvas-wrap">
+        <canvas id="calCanvas"></canvas>
+      </div>
+
+      <div class="cal-sidebar">
+        <div class="cal-sidebar-card">
+          <h3>
+            <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="14" height="14" rx="2"/><line x1="3" y1="8" x2="17" y2="8"/><line x1="3" y1="12" x2="17" y2="12"/><line x1="8" y1="3" x2="8" y2="17"/><line x1="12" y1="3" x2="12" y2="17"/></svg>
+            Mark Points
+          </h3>
+          <p>Click on the image to place markers. <strong>First 4 = pitch corners</strong> (clockwise), <strong>next 4 = goal posts</strong> (left goal then right goal, each left-to-right).</p>
+          <ul class="cal-points" id="calPoints">
+            <li data-idx="0">
+              <span class="dot" style="background:#ff5252"></span>
+              <span>Top-Left Corner</span>
+              <span class="check">&#10003;</span>
+              <span class="coord"></span>
+            </li>
+            <li data-idx="1">
+              <span class="dot" style="background:#ffd740"></span>
+              <span>Top-Right Corner</span>
+              <span class="check">&#10003;</span>
+              <span class="coord"></span>
+            </li>
+            <li data-idx="2">
+              <span class="dot" style="background:#40c4ff"></span>
+              <span>Bottom-Right Corner</span>
+              <span class="check">&#10003;</span>
+              <span class="coord"></span>
+            </li>
+            <li data-idx="3">
+              <span class="dot" style="background:#b388ff"></span>
+              <span>Bottom-Left Corner</span>
+              <span class="check">&#10003;</span>
+              <span class="coord"></span>
+            </li>
+            <li data-idx="4" style="border-top:1px solid var(--border-light);padding-top:10px;margin-top:4px;">
+              <span class="dot" style="background:#ff8a5c"></span>
+              <span>Left Goal — Left Post</span>
+              <span class="check">&#10003;</span>
+              <span class="coord"></span>
+            </li>
+            <li data-idx="5">
+              <span class="dot" style="background:#ffab40"></span>
+              <span>Left Goal — Right Post</span>
+              <span class="check">&#10003;</span>
+              <span class="coord"></span>
+            </li>
+            <li data-idx="6" style="border-top:1px solid var(--border-light);padding-top:10px;margin-top:4px;">
+              <span class="dot" style="background:#69f0ae"></span>
+              <span>Right Goal — Left Post</span>
+              <span class="check">&#10003;</span>
+              <span class="coord"></span>
+            </li>
+            <li data-idx="7">
+              <span class="dot" style="background:#00e5ff"></span>
+              <span>Right Goal — Right Post</span>
+              <span class="check">&#10003;</span>
+              <span class="coord"></span>
+            </li>
+          </ul>
+        </div>
+
+        <div class="cal-sidebar-card">
+          <h3>
+            <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M7 16c0-2 3-3 3-3s3 1 3 3"/><circle cx="10" cy="7" r="3"/><path d="M3 18c0-3 3-5 7-5s7 2 7 5"/><circle cx="10" cy="7" r="4"/></svg>
+            Team Preference
+          </h3>
+          <label class="cal-label">Highlight players from</label>
+          <select class="cal-team-select" id="calTeam">
+            <option value="All">Both teams (show all)</option>
+            <option value="0">Team 1 (green highlights)</option>
+            <option value="1">Team 2 (green highlights)</option>
+          </select>
+        </div>
+
+        <div class="cal-sidebar-card">
+          <div class="cal-actions">
+            <button class="btn btn-secondary btn-sm" id="undoBtn" onclick="undoPoint()" disabled>
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6H2V4"/><path d="M14 10a6 6 0 1 1-1.5-7.5L9 6"/></svg>
+              Undo
+            </button>
+            <button class="btn btn-ghost btn-sm" onclick="clearPoints()">
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M5 5l6 6m0-6l-6 6"/></svg>
+              Clear
+            </button>
+            <button class="btn btn-primary" id="saveCalBtn" onclick="saveCalibration()" disabled style="margin-left:auto;">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4l-8 8L3 9"/></svg>
+              Save & Continue
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ Step 3: Process ═══ -->
+  <div class="panel" id="panel3">
+    <div class="section-header">
+      <h2>Processing</h2>
+      <p>Running detection &amp; analysis pipeline</p>
+    </div>
+
+    <div class="proc-grid" id="procGrid">
+      <div class="proc-card">
+        <div class="val" id="procVideoName">—</div>
+        <div class="label">Video</div>
+      </div>
+      <div class="proc-card">
+        <div class="val" id="procCalPts">0</div>
+        <div class="label">Calibration Points</div>
+      </div>
+      <div class="proc-card">
+        <div class="val" id="procStatusVal">Ready</div>
+        <div class="label">Status</div>
+      </div>
+    </div>
+
+    <div style="text-align:center;margin-bottom:16px;">
+      <button class="btn btn-primary btn-lg" id="processBtn" onclick="startProcessing()">
+        <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="14" height="14" rx="2"/><polygon points="9,7 14,10 9,13" fill="currentColor" stroke="none"/><path d="M7 3v14"/></svg>
+        Start Analysis
+      </button>
+    </div>
+
+    <div class="proc-status-card" id="procStatus" style="display:none;">
+      <div class="spinner"></div>
+      <div class="msg" id="procMsg">Initializing&hellip;</div>
+      <div class="sub" id="procSub">This usually takes 1–3 minutes</div>
+      <div class="progress-wrap"><div class="fill" id="procFill"></div></div>
+    </div>
+
+    <div class="proc-debug" id="procDebug"></div>
+  </div>
+
+  <!-- ═══ Step 4: Results ═══ -->
+  <div class="panel" id="panel4">
+    <div class="section-header">
+      <h2>Match Analysis</h2>
+      <p>Player stats, passes, goals, and ball movement</p>
+    </div>
+
+    <div class="results-section visible" id="resultsSection">
+
+      <!-- Video Player -->
+      <div class="results-video-wrap">
+        <video id="resultVideo" controls autoplay muted playsinline></video>
+      </div>
+
+      <!-- Stats Summary -->
+      <div class="stats-summary" id="statsSummary"></div>
+
+      <!-- Tabs -->
+      <div class="tabs">
+        <div class="tab active" data-tab="distances">
+          <svg width="13" height="13" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="8"/><path d="M10 6v4l3 2"/><line x1="4" y1="4" x2="7" y2="7"/></svg>
+          Distances
+        </div>
+        <div class="tab" data-tab="passes">
+          <svg width="13" height="13" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 14a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/><path d="M14 12a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/><line x1="8" y1="11" x2="12" y2="9"/></svg>
+          Passes
+        </div>
+        <div class="tab" data-tab="goals">
+          <svg width="13" height="13" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7" width="14" height="10" rx="1"/><path d="M3 7l7-4 7 4"/><circle cx="10" cy="12" r="2"/><line x1="10" y1="5" x2="10" y2="7"/></svg>
+          Goals
+        </div>
+        <div class="tab" data-tab="ball">
+          <svg width="13" height="13" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="8"/><path d="M10 2a8 8 0 0 1 5.5 2"/><path d="M10 18a8 8 0 0 0 5.5-2"/><path d="M2 10h16"/><path d="M5 5l3 3"/></svg>
+          Ball Trail
+        </div>
+      </div>
+
+      <div class="tab-content active" id="tabDistances">
+        <div class="table-wrap" style="max-height:480px;overflow-y:auto;">
+          <table>
+            <thead><tr><th>Player</th><th>ID</th><th>Team</th><th>Distance</th></tr></thead>
+            <tbody id="distTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="tab-content" id="tabPasses">
+        <div class="table-wrap" style="max-height:480px;overflow-y:auto;">
+          <table>
+            <thead><tr><th>#</th><th>From</th><th>To</th><th>Distance</th><th>Frame</th></tr></thead>
+            <tbody id="passTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="tab-content" id="tabGoals">
+        <div id="goalsBody"></div>
+      </div>
+
+      <div class="tab-content" id="tabBall">
+        <canvas id="ballTrailCanvas" height="220"></canvas>
+      </div>
+
+      <div class="download-bar">
+        <button class="btn btn-secondary btn-sm" onclick="downloadJSON()">
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v8m0 0l-3-3m3 3l3-3"/><path d="M2 11v2a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1v-2"/></svg>
+          Export JSON
+        </button>
+        <button class="btn btn-ghost btn-sm" onclick="goStep(3)">
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M11 3L5 8l6 5"/></svg>
+          Back
+        </button>
+        <button class="btn btn-primary btn-sm" onclick="resetAll()">
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8a5 5 0 0 1 9-3M13 8a5 5 0 0 1-9 3"/><path d="M12 3v3H9M4 13v-3h3"/></svg>
+          New Analysis
+        </button>
+      </div>
+
+    </div>
+  </div>
+
+</div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────
+const state = {
+  videoId: null,
+  videoName: null,
+  taskId: null,
+  calPoints: [],
+  img: null,
+  imgScale: 1,
+  results: null,
+  pollTimer: null,
+};
+
+// ── Toast ──────────────────────────────────────────────────────────────
+function showToast(msg, type) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast' + (type ? ' ' + type : '');
+  t.classList.add('show');
+  clearTimeout(t._hide);
+  t._hide = setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+// ── Step Navigation ────────────────────────────────────────────────────
+function goStep(n) {
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.step').forEach(s => s.classList.remove('active'));
+  document.getElementById(`panel${n}`).classList.add('active');
+  document.querySelector(`.step[data-step="${n}"]`).classList.add('active');
+  for (let i = 1; i < n; i++) {
+    document.querySelector(`.step[data-step="${i}"]`).classList.add('done');
+  }
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+// ── Reset ──────────────────────────────────────────────────────────────
+function resetAll() {
+  if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
+  state.videoId = null;
+  state.videoName = null;
+  state.taskId = null;
+  state.calPoints = [];
+  state.results = null;
+  document.getElementById('uploadZone').innerHTML = `
+    <div class="upload-icon">
+      <svg viewBox="0 0 28 28" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="20" height="22" rx="2"/><line x1="4" y1="9" x2="24" y2="9"/><line x1="4" y1="15" x2="24" y2="15"/><line x1="14" y1="3" x2="14" y2="25"/><circle cx="14" cy="12" r="2"/><circle cx="14" cy="18" r="2"/><path d="M10 6l4-3 4 3"/><path d="M10 22l4 3 4-3"/></svg>
+    </div>
+    <h2>Choose a video file</h2>
+    <p>MP4, MOV, AVI &bull; Max 500MB</p>
+    <input type="file" id="fileInput" accept="video/*">
+  `;
+  document.querySelector('.upload-preview').style.display = 'none';
+  document.getElementById('fileInput').addEventListener('change', () => {
+    if (fileInput.files.length) handleFile(fileInput.files[0]);
+  });
+  goStep(1);
+}
+
+// ── Upload ─────────────────────────────────────────────────────────────
+const uploadZone = document.getElementById('uploadZone');
+const fileInput = document.getElementById('fileInput');
+
+uploadZone.addEventListener('click', (e) => {
+  if (e.target === uploadZone || e.target.closest('.upload-icon') || e.target.tagName === 'H2' || e.target.tagName === 'P') {
+    document.getElementById('fileInput').click();
+  }
+});
+uploadZone.addEventListener('dragover', (e) => { e.preventDefault(); uploadZone.classList.add('dragover'); });
+uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('dragover'));
+uploadZone.addEventListener('drop', (e) => {
+  e.preventDefault();
+  uploadZone.classList.remove('dragover');
+  if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+});
+document.addEventListener('change', (e) => {
+  if (e.target.id === 'fileInput' && e.target.files.length) handleFile(e.target.files[0]);
+});
+
+async function handleFile(file) {
+  const formData = new FormData();
+  formData.append('file', file);
+  document.querySelector('.upload-preview').style.display = 'none';
+  uploadZone.innerHTML = `
+    <div style="text-align:center;padding:20px;">
+      <div style="width:40px;height:40px;border:3px solid var(--border-light);border-top-color:var(--gold);border-radius:50%;animation:spin .7s linear infinite;margin:0 auto 12px;"></div>
+      <p style="color:var(--text-muted);font-size:14px;">Uploading ${file.name}&hellip;</p>
+    </div>
+  `;
+  try {
+    const res = await fetch('/api/upload', { method: 'POST', body: formData });
+    if (!res.ok) throw new Error((await res.text()).slice(0, 200));
+    const data = await res.json();
+    state.videoId = data.video_id;
+    state.videoName = data.video_name;
+    const img = document.getElementById('previewImage');
+    img.src = data.frame_url + '?t=' + Date.now();
+    img.onload = () => { state.img = img; setupCalibration(); };
+    document.getElementById('fileName').textContent = file.name;
+    document.getElementById('fileDims').textContent = `${data.width} × ${data.height}`;
+    document.querySelector('.upload-preview').style.display = 'block';
+    uploadZone.innerHTML = `
+      <div class="upload-icon" style="background:var(--teal-glow);">
+        <svg viewBox="0 0 24 24" fill="none" stroke="var(--teal)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="width:28px;height:28px;"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+      </div>
+      <h2 style="color:var(--teal);font-weight:600;">Uploaded successfully</h2>
+      <p>${file.name} &mdash; ready to calibrate</p>
+      <input type="file" id="fileInput" accept="video/*" style="display:none;">
+    `;
+    document.getElementById('fileInput').addEventListener('change', () => {
+      if (fileInput.files.length) handleFile(fileInput.files[0]);
+    });
+    showToast('Video uploaded successfully', 'success');
+  } catch (err) {
+    uploadZone.innerHTML = `
+      <div class="upload-icon" style="background:rgba(255,71,87,0.12);">
+        <svg viewBox="0 0 24 24" fill="none" stroke="var(--red)" stroke-width="1.6" stroke-linecap="round" style="width:28px;height:28px;"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+      </div>
+      <h2>Upload failed</h2>
+      <p style="color:var(--red);font-size:13px;">${err.message}</p>
+      <input type="file" id="fileInput" accept="video/*" style="display:none;">
+    `;
+    document.getElementById('fileInput').addEventListener('change', () => {
+      if (fileInput.files.length) handleFile(fileInput.files[0]);
+    });
+    showToast('Upload failed: ' + err.message, 'error');
+  }
+}
+
+// ── Calibration ────────────────────────────────────────────────────────
+const calCanvas = document.getElementById('calCanvas');
+const cx = calCanvas.getContext('2d');
+const POINT_COLORS = ['#ff5252', '#ffd740', '#40c4ff', '#b388ff', '#ff8a5c', '#ffab40', '#69f0ae', '#00e5ff'];
+const POINT_NAMES = ['TL', 'TR', 'BR', 'BL', 'LGL', 'LGR', 'RGL', 'RGR'];
+
+function setupCalibration() {
+  goStep(2);
+  const maxW = Math.min(window.innerWidth - 380, 820);
+  const maxH = window.innerHeight - 220;
+  const iw = state.img.naturalWidth;
+  const ih = state.img.naturalHeight;
+  state.imgScale = Math.min(1, maxW / iw, maxH / ih);
+  calCanvas.width = iw * state.imgScale;
+  calCanvas.height = ih * state.imgScale;
+  drawCalibration();
+}
+
+function drawCalibration() {
+  const s = state.imgScale;
+  cx.clearRect(0, 0, calCanvas.width, calCanvas.height);
+  cx.drawImage(state.img, 0, 0, calCanvas.width, calCanvas.height);
+  // Pitch outline
+  if (state.calPoints.length >= 2) {
+    cx.beginPath();
+    cx.strokeStyle = '#f7c948';
+    cx.lineWidth = 2;
+    cx.setLineDash([6, 4]);
+    for (let i = 0; i < Math.min(state.calPoints.length, 4); i++) {
+      const p = state.calPoints[i];
+      if (i === 0) cx.moveTo(p.x * s, p.y * s);
+      else cx.lineTo(p.x * s, p.y * s);
+    }
+    if (state.calPoints.length >= 4) cx.closePath();
+    cx.stroke();
+    cx.setLineDash([]);
+  }
+  // Goal lines (between post pairs)
+  if (state.calPoints.length >= 6) {
+    const lg1 = state.calPoints[4], lg2 = state.calPoints[5];
+    cx.beginPath();
+    cx.strokeStyle = '#ff5252';
+    cx.lineWidth = 4;
+    cx.moveTo(lg1.x * s, lg1.y * s);
+    cx.lineTo(lg2.x * s, lg2.y * s);
+    cx.stroke();
+    // Goal net (filled area behind)
+    const dx = (lg2.x - lg1.x) * 0.4, dy = (lg2.y - lg1.y) * 0.4;
+    cx.beginPath();
+    cx.fillStyle = 'rgba(255, 82, 82, 0.12)';
+    cx.moveTo(lg1.x * s, lg1.y * s);
+    cx.lineTo(lg2.x * s, lg2.y * s);
+    cx.lineTo((lg2.x - dy) * s, (lg2.y + dx) * s);
+    cx.lineTo((lg1.x - dy) * s, (lg1.y + dx) * s);
+    cx.closePath();
+    cx.fill();
+    cx.strokeStyle = 'rgba(255, 82, 82, 0.3)';
+    cx.lineWidth = 1;
+    cx.setLineDash([4, 4]);
+    cx.stroke();
+    cx.setLineDash([]);
+  }
+  if (state.calPoints.length >= 8) {
+    const rg1 = state.calPoints[6], rg2 = state.calPoints[7];
+    cx.beginPath();
+    cx.strokeStyle = '#69f0ae';
+    cx.lineWidth = 4;
+    cx.moveTo(rg1.x * s, rg1.y * s);
+    cx.lineTo(rg2.x * s, rg2.y * s);
+    cx.stroke();
+    // Goal net
+    const dx = (rg2.x - rg1.x) * 0.4, dy = (rg2.y - rg1.y) * 0.4;
+    cx.beginPath();
+    cx.fillStyle = 'rgba(105, 240, 174, 0.12)';
+    cx.moveTo(rg1.x * s, rg1.y * s);
+    cx.lineTo(rg2.x * s, rg2.y * s);
+    cx.lineTo((rg2.x + dy) * s, (rg2.y - dx) * s);
+    cx.lineTo((rg1.x + dy) * s, (rg1.y - dx) * s);
+    cx.closePath();
+    cx.fill();
+    cx.strokeStyle = 'rgba(105, 240, 174, 0.3)';
+    cx.lineWidth = 1;
+    cx.setLineDash([4, 4]);
+    cx.stroke();
+    cx.setLineDash([]);
+  }
+  // Points
+  state.calPoints.forEach((p, i) => {
+    const px = p.x * s, py = p.y * s;
+    // Outer glow
+    const grad = cx.createRadialGradient(px, py, 0, px, py, 14);
+    grad.addColorStop(0, POINT_COLORS[i] + '60');
+    grad.addColorStop(1, 'transparent');
+    cx.beginPath();
+    cx.arc(px, py, 14, 0, Math.PI * 2);
+    cx.fillStyle = grad;
+    cx.fill();
+    // Dot
+    cx.beginPath();
+    cx.arc(px, py, 5, 0, Math.PI * 2);
+    cx.fillStyle = POINT_COLORS[i];
+    cx.fill();
+    cx.strokeStyle = '#fff';
+    cx.lineWidth = 1.5;
+    cx.stroke();
+    // Label
+    cx.fillStyle = '#fff';
+    cx.font = 'bold 12px Inter, sans-serif';
+    cx.textAlign = 'center';
+    cx.shadowColor = 'rgba(0,0,0,0.8)';
+    cx.shadowBlur = 4;
+    cx.fillText(POINT_NAMES[i], px, py - 12);
+    cx.shadowBlur = 0;
+  });
+}
+
+calCanvas.addEventListener('click', (e) => {
+  if (state.calPoints.length >= 8) return;
+  const rect = calCanvas.getBoundingClientRect();
+  const x = (e.clientX - rect.left) / rect.width * calCanvas.width / state.imgScale;
+  const y = (e.clientY - rect.top) / rect.height * calCanvas.height / state.imgScale;
+  state.calPoints.push({ x: Math.round(x), y: Math.round(y) });
+  updateCalUI();
+});
+
+function updateCalUI() {
+  drawCalibration();
+  document.querySelectorAll('.cal-points li').forEach((li, i) => {
+    if (i < state.calPoints.length) {
+      li.classList.add('done');
+      const coord = li.querySelector('.coord');
+      if (coord) coord.textContent = `(${state.calPoints[i].x}, ${state.calPoints[i].y})`;
+    } else {
+      li.classList.remove('done');
+      const coord = li.querySelector('.coord');
+      if (coord) coord.textContent = '';
+    }
+  });
+  document.getElementById('undoBtn').disabled = state.calPoints.length === 0;
+  document.getElementById('saveCalBtn').disabled = state.calPoints.length < 8;
+}
+
+function undoPoint() {
+  if (state.calPoints.length > 0) {
+    state.calPoints.pop();
+    updateCalUI();
+  }
+}
+
+function clearPoints() {
+  state.calPoints = [];
+  updateCalUI();
+}
+
+async function saveCalibration() {
+  if (state.calPoints.length < 8) return;
+  const team = document.getElementById('calTeam').value;
+  const polygon = state.calPoints.slice(0, 4).map(p => [p.x, p.y]);
+  // Goals: 4 points — left goal (Lpost, Rpost), right goal (Lpost, Rpost)
+  const goals = state.calPoints.slice(4, 8).map(p => [p.x, p.y]);
+  document.getElementById('saveCalBtn').disabled = true;
+  document.getElementById('saveCalBtn').textContent = 'Saving…';
+  try {
+    const res = await fetch('/api/calibrate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ video_id: state.videoId, pitch_polygon: polygon, goals, my_team: team }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    showToast('Calibration saved', 'success');
+    goStep(3);
+    document.getElementById('procVideoName').textContent = state.videoName || '—';
+    document.getElementById('procCalPts').textContent = state.calPoints.length;
+    document.getElementById('procStatusVal').textContent = 'Ready';
+  } catch (err) {
+    showToast('Calibration failed: ' + err.message, 'error');
+    document.getElementById('saveCalBtn').disabled = false;
+    document.getElementById('saveCalBtn').textContent = 'Save & Continue';
+  }
+}
+
+// ── Process ────────────────────────────────────────────────────────────
+async function startProcessing() {
+  document.getElementById('processBtn').style.display = 'none';
+  document.getElementById('procStatus').style.display = 'block';
+  document.getElementById('procDebug').style.display = 'none';
+  document.getElementById('procStatusVal').textContent = 'Running…';
+  document.getElementById('procMsg').textContent = 'Starting analysis…';
+  document.getElementById('procSub').textContent = 'Running detection pipeline';
+  document.getElementById('procFill').style.width = '0%';
+  try {
+    const res = await fetch('/api/process', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ video_id: state.videoId, video_name: state.videoName }),
+    });
+    if (!res.ok) throw new Error((await res.text()).slice(0, 200));
+    const data = await res.json();
+    state.taskId = data.task_id;
+    pollStatus();
+  } catch (err) {
+    document.getElementById('procMsg').textContent = 'Failed to start';
+    document.getElementById('procSub').textContent = err.message;
+    document.getElementById('processBtn').style.display = 'inline-flex';
+    document.getElementById('procStatus').style.display = 'none';
+    showToast('Error: ' + err.message, 'error');
+  }
+}
+
+function pollStatus() {
+  if (state.pollTimer) clearInterval(state.pollTimer);
+  state.pollTimer = setInterval(async () => {
+    try {
+      const res = await fetch(`/api/status/${state.taskId}`);
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      if (data.stdout) {
+        const dbg = document.getElementById('procDebug');
+        dbg.style.display = 'block';
+        dbg.textContent = data.stdout + (data.stderr || '');
+        dbg.scrollTop = dbg.scrollHeight;
+        const match = data.stdout.match(/(\d+)\/(\d+)\s*\((\d+)%\)/);
+        if (match) {
+          const pct = parseInt(match[3]);
+          document.getElementById('procFill').style.width = Math.min(pct, 95) + '%';
+          document.getElementById('procMsg').textContent = `Analyzing frame ${match[1]} of ${match[2]}`;
+        }
+      }
+      if (data.status === 'completed') {
+        clearInterval(state.pollTimer);
+        document.getElementById('procFill').style.width = '100%';
+        document.getElementById('procMsg').textContent = 'Analysis complete!';
+        document.getElementById('procSub').textContent = 'Loading results…';
+        document.getElementById('procStatusVal').textContent = 'Done';
+        await loadResults();
+      } else if (data.status === 'error') {
+        clearInterval(state.pollTimer);
+        document.getElementById('procMsg').textContent = 'Error occurred';
+        document.getElementById('procSub').textContent = data.error || 'Unknown error';
+        document.getElementById('procFill').style.width = '0%';
+        document.getElementById('procStatusVal').textContent = 'Error';
+        document.getElementById('processBtn').style.display = 'inline-flex';
+        showToast('Processing failed: ' + (data.error || 'Unknown error'), 'error');
+      }
+    } catch (err) {}
+  }, 600);
+}
+
+// ── Results ────────────────────────────────────────────────────────────
+async function loadResults() {
+  try {
+    const res = await fetch(`/api/results/${state.taskId}`);
+    if (!res.ok) throw new Error(await res.text());
+    state.results = await res.json();
+    goStep(4);
+    renderResults();
+  } catch (err) {
+    document.getElementById('procMsg').textContent = 'Error loading results';
+    document.getElementById('procSub').textContent = err.message;
+  }
+}
+
+function renderResults() {
+  const r = state.results;
+  if (!r) return;
+
+  // Load video
+  const vid = document.getElementById('resultVideo');
+  fetch(`/api/status/${state.taskId}`).then(r => r.json()).then(data => {
+    if (data.video_url) { vid.src = data.video_url + '?t=' + Date.now(); vid.load(); }
+  });
+
+  // Stats summary
+  const dist = r.stats?.distances?.per_track_meters || {};
+  const entries = Object.entries(dist).sort((a, b) => b[1] - a[1]);
+  const totalDist = entries.reduce((s, e) => s + e[1], 0);
+  const passes = r.stats?.passes || [];
+  const goals = r.stats?.goals || [];
+  const ballTrail = r.ball_trail || [];
+
+  document.getElementById('statsSummary').innerHTML = `
+    <div class="stat-summary-card">
+      <div class="stat-icon orange"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="7"/><path d="M10 6v4l3 2"/><circle cx="10" cy="10" r="9"/><path d="M3 3l3 3M17 17l-3-3"/></svg></div>
+      <div class="stat-info">
+        <div class="stat-num" style="color:var(--orange);">${entries.length}</div>
+        <div class="stat-label">Players Tracked</div>
+      </div>
+    </div>
+    <div class="stat-summary-card">
+      <div class="stat-icon teal"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><line x1="2" y1="18" x2="18" y2="2"/><circle cx="7" cy="13" r="2"/><circle cx="13" cy="7" r="2"/><path d="M18 2l-4 4M2 18l4-4"/></svg></div>
+      <div class="stat-info">
+        <div class="stat-num" style="color:var(--teal);">${totalDist.toFixed(0)}</div>
+        <div class="stat-label">Total Meters</div>
+      </div>
+    </div>
+    <div class="stat-summary-card">
+      <div class="stat-icon blue"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="14" r="3"/><circle cx="14" cy="8" r="3"/><line x1="8" y1="12" x2="12" y2="9"/><path d="M3 3l4 4M17 17l-4-4"/></svg></div>
+      <div class="stat-info">
+        <div class="stat-num" style="color:var(--blue-accent);">${passes.length}</div>
+        <div class="stat-label">Passes</div>
+      </div>
+    </div>
+    <div class="stat-summary-card">
+      <div class="stat-icon red"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7" width="14" height="10" rx="1"/><path d="M3 7l7-4 7 4"/><circle cx="10" cy="12" r="2"/></svg></div>
+      <div class="stat-info">
+        <div class="stat-num" style="color:var(--red);">${goals.length}</div>
+        <div class="stat-label">Goals</div>
+      </div>
+    </div>
+    <div class="stat-summary-card">
+      <div class="stat-icon gold"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="8"/><path d="M10 5v3"/><path d="M7 8l3 2 3-2"/><path d="M10 11v4"/><path d="M14 10l-4 2-4-2"/></svg></div>
+      <div class="stat-info">
+        <div class="stat-num" style="color:var(--gold);">${ballTrail.length}</div>
+        <div class="stat-label">Ball Positions</div>
+      </div>
+    </div>
+  `;
+
+  // Determine team for each track
+  const detections = r.detections || [];
+  const trackTeams = {};
+  detections.forEach(d => { if (d.track_id > 0) trackTeams[d.track_id] = d.team || 'Unknown'; });
+  const names = r.player_names || {};
+
+  // Distances table
+  const tbody = document.getElementById('distTableBody');
+  tbody.innerHTML = entries.length ? '' : '<tr><td colspan="4" style="text-align:center;padding:40px;color:var(--text-muted);">No distance data recorded</td></tr>';
+  entries.forEach(([tid, dist_m]) => {
+    const tr = document.createElement('tr');
+    const name = names[tid] || '';
+    const team = trackTeams[tid] || 'Unknown';
+    let badge = '<span class="badge badge-unknown">Unknown</span>';
+    if (team === 'My Team') badge = '<span class="badge badge-myteam"><svg width="8" height="8" viewBox="0 0 8 8" fill="var(--teal)" style="vertical-align:middle;margin-right:2px;"><circle cx="4" cy="4" r="3"/></svg>My Team</span>';
+    else if (team === 'Team 2' || team === 'Team 1') badge = `<span class="badge badge-opponent"><svg width="8" height="8" viewBox="0 0 8 8" fill="var(--red)" style="vertical-align:middle;margin-right:2px;"><circle cx="4" cy="4" r="3"/></svg>${team}</span>`;
+    tr.innerHTML = `
+      <td><input class="player-name-input" value="${escapeHtml(name)}" placeholder="Player ${tid}" data-tid="${tid}" onchange="updatePlayerName(this)"></td>
+      <td style="color:var(--text-muted);font-family:monospace;font-size:13px;">#${tid}</td>
+      <td>${badge}</td>
+      <td style="font-weight:700;">${dist_m.toFixed(1)} <span style="font-weight:400;color:var(--text-muted);font-size:12px;">m</span></td>
+    `;
+    tbody.appendChild(tr);
+  });
+
+  // Passes table
+  const passBody = document.getElementById('passTableBody');
+  passBody.innerHTML = passes.length ? '' : '<tr><td colspan="5" style="text-align:center;padding:40px;color:var(--text-muted);">No passes detected</td></tr>';
+  passes.forEach((p, i) => {
+    const tr = document.createElement('tr');
+    const fromName = names[p.passer_track_id] || `#${p.passer_track_id}`;
+    const toName = names[p.receiver_track_id] || `#${p.receiver_track_id}`;
+    tr.innerHTML = `
+      <td style="color:var(--text-muted);">${i + 1}</td>
+      <td style="font-weight:600;">${escapeHtml(fromName)}</td>
+      <td style="font-weight:600;">${escapeHtml(toName)}</td>
+      <td>${p.ball_distance_m.toFixed(1)} <span style="color:var(--text-muted);font-size:12px;">m</span></td>
+      <td style="color:var(--text-muted);font-family:monospace;font-size:13px;">${p.frame}</td>
+    `;
+    passBody.appendChild(tr);
+  });
+
+  // Goals
+  const goalsDiv = document.getElementById('goalsBody');
+  if (goals.length) {
+    let html = '<div class="table-wrap"><table><thead><tr><th>#</th><th>Frame</th><th>Confidence</th><th>Position</th></tr></thead><tbody>';
+    goals.forEach((g, i) => {
+      html += `<tr><td style="color:var(--text-muted);">${i + 1}</td><td style="font-family:monospace;">${g.frame}</td><td>${(g.confidence * 100).toFixed(1)}%</td><td style="color:var(--text-muted);font-family:monospace;">(${g.goal_x.toFixed(0)}, ${g.goal_y.toFixed(0)})</td></tr>`;
+    });
+    html += '</tbody></table></div>';
+    goalsDiv.innerHTML = html;
+  } else {
+    goalsDiv.innerHTML = '<div class="empty-state"><div class="empty-icon"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg></div><h3>No goals detected</h3><p>The ball didn\'t enter the goal area during this clip</p></div>';
+  }
+
+  // Ball trail
+  drawBallTrail();
+
+  // Tab switching
+  document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      const tabName = tab.dataset.tab;
+      document.getElementById('tab' + tabName.charAt(0).toUpperCase() + tabName.slice(1)).classList.add('active');
+      if (tabName === 'ball') setTimeout(drawBallTrail, 100);
+    });
+  });
+}
+
+function drawBallTrail() {
+  const canvas = document.getElementById('ballTrailCanvas');
+  const rect = canvas.parentElement.getBoundingClientRect();
+  canvas.width = Math.min(rect.width - 4, 1080);
+  canvas.height = 220;
+  const ctx2 = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height;
+
+  // Pitch background
+  ctx2.fillStyle = '#0d2818';
+  ctx2.fillRect(0, 0, w, h);
+
+  // Pitch markings
+  ctx2.strokeStyle = 'rgba(255,255,255,0.08)';
+  ctx2.lineWidth = 1;
+  const margin = 20;
+  ctx2.strokeRect(margin, margin, w - margin * 2, h - margin * 2);
+  ctx2.beginPath();
+  ctx2.arc(w / 2, h / 2, 28, 0, Math.PI * 2);
+  ctx2.stroke();
+  ctx2.beginPath();
+  ctx2.moveTo(w / 2, margin);
+  ctx2.lineTo(w / 2, h - margin);
+  ctx2.stroke();
+
+  const trail = state.results?.ball_trail || [];
+  if (trail.length < 2) {
+    ctx2.fillStyle = 'rgba(255,255,255,0.15)';
+    ctx2.font = '14px Inter, sans-serif';
+    ctx2.textAlign = 'center';
+    ctx2.fillText('Not enough ball data to draw trail', w / 2, h / 2 + 5);
+    return;
+  }
+
+  const xs = trail.map(p => p[0]), ys = trail.map(p => p[1]);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const pad = margin;
+  const sX = (w - pad * 2) / (maxX - minX || 1);
+  const sY = (h - pad * 2) / (maxY - minY || 1);
+
+  // Trail
+  for (let i = 1; i < trail.length; i++) {
+    const x1 = pad + (trail[i - 1][0] - minX) * sX;
+    const y1 = pad + (trail[i - 1][1] - minY) * sY;
+    const x2 = pad + (trail[i][0] - minX) * sX;
+    const y2 = pad + (trail[i][1] - minY) * sY;
+    ctx2.beginPath();
+    ctx2.moveTo(x1, y1);
+    ctx2.lineTo(x2, y2);
+    ctx2.strokeStyle = `rgba(247, 201, 72, ${0.2 + 0.8 * i / trail.length})`;
+    ctx2.lineWidth = 2.5;
+    ctx2.stroke();
+  }
+
+  // Start marker
+  const sx = pad + (trail[0][0] - minX) * sX;
+  const sy = pad + (trail[0][1] - minY) * sY;
+  ctx2.beginPath();
+  ctx2.arc(sx, sy, 5, 0, Math.PI * 2);
+  ctx2.fillStyle = '#69f0ae';
+  ctx2.fill();
+  ctx2.strokeStyle = '#fff';
+  ctx2.lineWidth = 1.5;
+  ctx2.stroke();
+
+  // End marker
+  const ex = pad + (trail[trail.length - 1][0] - minX) * sX;
+  const ey = pad + (trail[trail.length - 1][1] - minY) * sY;
+  ctx2.beginPath();
+  ctx2.arc(ex, ey, 5, 0, Math.PI * 2);
+  ctx2.fillStyle = '#ff5252';
+  ctx2.fill();
+  ctx2.strokeStyle = '#fff';
+  ctx2.lineWidth = 1.5;
+  ctx2.stroke();
+
+  // Start/end labels
+  ctx2.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx2.font = '10px Inter, sans-serif';
+  ctx2.textAlign = 'center';
+  ctx2.fillText('START', sx, sy - 12);
+  ctx2.fillText('END', ex, ey - 12);
+}
+
+// ── Player Name Editing ────────────────────────────────────────────────
+async function updatePlayerName(input) {
+  const tid = input.dataset.tid;
+  const name = input.value;
+  try {
+    const res = await fetch('/api/player-name', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task_id: state.taskId, track_id: parseInt(tid), name }),
+    });
+    if (res.ok) {
+      input.classList.add('saved');
+      setTimeout(() => input.classList.remove('saved'), 1000);
+      showToast('Player name saved', 'success');
+    }
+  } catch (e) {}
+}
+
+// ── Download ───────────────────────────────────────────────────────────
+function downloadJSON() {
+  const data = JSON.stringify(state.results, null, 2);
+  const blob = new Blob([data], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = (state.videoName || 'goalhub') + '_results.json';
+  a.click();
+  URL.revokeObjectURL(url);
+  showToast('JSON downloaded', 'success');
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────
+function escapeHtml(s) {
+  if (s == null) return '';
+  const d = document.createElement('div');
+  d.textContent = String(s);
+  return d.innerHTML;
+}
+</script>
+</body>
+</html>

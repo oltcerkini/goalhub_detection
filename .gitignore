@@ -11,3 +11,12 @@ __pycache__/
 debug_*.py
 debug_*.jpg
 debug_*.png
+
+# Data directories (not tracked)
+app_data/
+ui_ux_skill/
+datasets/
+runs/
+semi_supervised_data/
+soccana_dataset/
+youtube_matches_1080p/
