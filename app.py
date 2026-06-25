@@ -356,6 +356,58 @@ def _find_output_video(task) -> str | None:
     return None
 
 
+# ── Re-render (team filter) ─────────────────────────────────────────────────
+
+@app.post("/api/re-render")
+async def re_render(data: dict):
+    """Re-render the processed video filtered to one team."""
+    task_id = data.get("task_id")
+    team = data.get("team")  # "My Team" or "Team 2"
+
+    if not task_id or not team:
+        raise HTTPException(400, "Missing task_id or team")
+
+    task = tasks.get(task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    if task["status"] != "completed":
+        raise HTTPException(400, "Task not completed yet")
+
+    results_path = task.get("results_path")
+    if not results_path or not Path(results_path).exists():
+        raise HTTPException(404, "Results file not found")
+
+    # Build output path
+    video_name = task.get("video_name", "")
+    stem = Path(video_name).stem
+    team_slug = team.lower().replace(" ", "_")
+    filtered_path = OUTPUT_DIR / f"{stem}_filtered_{team_slug}.mp4"
+
+    # Skip if already rendered
+    if filtered_path.exists():
+        return {"video_url": f"/api/media/{filtered_path.name}", "team": team}
+
+    # Run render_filtered.py
+    cmd = [
+        sys.executable, str(BASE_DIR / "render_filtered.py"),
+        "--results", results_path,
+        "--team", team,
+        "--output-dir", str(OUTPUT_DIR),
+    ]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        if result.returncode != 0:
+            raise HTTPException(500, f"Re-render failed: {result.stderr[-1000:]}")
+    except subprocess.TimeoutExpired:
+        raise HTTPException(500, "Re-render timed out (>10 minutes)")
+
+    if not filtered_path.exists():
+        raise HTTPException(500, "Re-rendered video not found at expected path")
+
+    return {"video_url": f"/api/media/{filtered_path.name}", "team": team}
+
+
 # ── List tasks ─────────────────────────────────────────────────────────────
 
 @app.get("/api/tasks")
