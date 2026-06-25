@@ -363,6 +363,7 @@ async def re_render(data: dict):
     """Re-render the processed video filtered to one team."""
     task_id = data.get("task_id")
     team = data.get("team")  # "My Team" or "Team 2"
+    attacking_goal = data.get("attacking_goal")  # "left" or "right" (optional)
 
     if not task_id or not team:
         raise HTTPException(400, "Missing task_id or team")
@@ -377,11 +378,12 @@ async def re_render(data: dict):
     if not results_path or not Path(results_path).exists():
         raise HTTPException(404, "Results file not found")
 
-    # Build output path
+    # Build output path (attacking_goal in filename to avoid cache collisions)
     video_name = task.get("video_name", "")
     stem = Path(video_name).stem
     team_slug = team.lower().replace(" ", "_")
-    filtered_path = OUTPUT_DIR / f"{stem}_filtered_{team_slug}.mp4"
+    attack_slug = f"_{attacking_goal}" if attacking_goal else ""
+    filtered_path = OUTPUT_DIR / f"{stem}_filtered_{team_slug}{attack_slug}.mp4"
 
     # Skip if already rendered
     if filtered_path.exists():
@@ -394,6 +396,8 @@ async def re_render(data: dict):
         "--team", team,
         "--output-dir", str(OUTPUT_DIR),
     ]
+    if attacking_goal:
+        cmd.extend(["--attacking-goal", attacking_goal])
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)

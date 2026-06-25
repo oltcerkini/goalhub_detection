@@ -38,6 +38,8 @@ def main():
     ap.add_argument("--results", required=True, help="Path to results JSON from process.py")
     ap.add_argument("--team", required=True, choices=["My Team", "Team 2"],
                     help="Which team's players to show")
+    ap.add_argument("--attacking-goal", default=None, choices=["left", "right"],
+                    help="Which goal your team is attacking (determines which GK is yours)")
     ap.add_argument("--output-dir", default=None, help="Output directory")
     args = ap.parse_args()
 
@@ -50,13 +52,29 @@ def main():
         print(f"Source video not found: {video_path}")
         sys.exit(1)
 
-    # Build frame -> players lookup, filtered to selected team
+    # Determine which goalkeepers to include
+    gk_track_ids_in_data = set(data.get("goalkeeper_ids", []))
+    gk_by_goal = data.get("gk_by_goal", {})
+    gk_to_include = set()
+    if args.attacking_goal and gk_by_goal:
+        # GK defends the OPPOSITE goal from where we're attacking
+        defending_goal = "right" if args.attacking_goal == "left" else "left"
+        our_gk_tid = gk_by_goal.get(defending_goal)
+        if our_gk_tid:
+            gk_to_include.add(our_gk_tid)
+            print(f"  Including our GK: #{our_gk_tid} (defends {defending_goal} goal)")
+    else:
+        # No attacking direction = show all GKs
+        gk_to_include = gk_track_ids_in_data
+
+    # Build frame -> players lookup, filtered to selected team + our GK
     team_tracks = set()
     all_detections = data.get("detections", [])
     frame_players = defaultdict(list)
     for det in all_detections:
         team = det.get("team", "Unknown")
-        if team == args.team:
+        is_our_gk = det["track_id"] in gk_to_include
+        if team == args.team or is_our_gk:
             team_tracks.add(det["track_id"])
             frame_players[det["frame"]].append(det)
 
@@ -92,7 +110,8 @@ def main():
     out_dir = Path(args.output_dir) if args.output_dir else Path(args.results).parent
     stem = Path(video_path).stem
     team_slug = args.team.lower().replace(" ", "_")
-    out_path = str(out_dir / f"{stem}_filtered_{team_slug}.mp4")
+    attack_slug = f"_{args.attacking_goal}" if args.attacking_goal else ""
+    out_path = str(out_dir / f"{stem}_filtered_{team_slug}{attack_slug}.mp4")
     codec = cv2.VideoWriter_fourcc(*"mp4v")
 
     writer = cv2.VideoWriter(out_path, codec, fps / frame_skip, (w, h))
@@ -140,13 +159,18 @@ def main():
             cls_name = det.get("class", "Player")
 
             team = det.get("team", "Unknown")
-            if cls_id == PLAYER:
+            is_gk = det.get("goalkeeper", False)
+            if is_gk:
+                colour = (180, 50, 255)     # purple for all goalkeepers
+            elif cls_id == PLAYER:
                 colour = RENDER_TEAM_COLORS.get(team, (200, 200, 200))
             else:
                 colour = (0, 255, 0)
 
             cv2.rectangle(annotated, (x1, y1), (x2, y2), colour, 3)
-            if team == "My Team":
+            if is_gk:
+                tag = " GK"
+            elif team == "My Team":
                 tag = " [M]"
             elif team == "Team 2":
                 tag = " [T2]"

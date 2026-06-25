@@ -140,6 +140,11 @@ def main():
     if my_team is not None:
         team_classifier.set_my_team(my_team)
 
+    # ── Goalkeeper detection accumulators ──────────────────────────────
+    GK_FRAME_SAMPLE = 30
+    gk_positions = defaultdict(list)  # track_id -> [(cx, cy), ...]
+    gk_frames_collected = 0
+
     # ── FIRST PASS: detect + track + collect data ─────────────────────
     print("\nFirst pass — detecting & tracking…")
     cap = cv2.VideoCapture(args.video)
@@ -227,6 +232,13 @@ def main():
                                 track_distances[tid] = track_distances.get(tid, 0.0) + dist
                     prev_positions[tid] = (cx, cy)
 
+                    # Record position for goalkeeper detection (first frames only)
+                    if gk_frames_collected < GK_FRAME_SAMPLE:
+                        gk_positions[tid].append((cx, cy))
+
+            if gk_frames_collected < GK_FRAME_SAMPLE:
+                gk_frames_collected += 1
+
         # Ball trail
         if ball_xy is not None:
             cx, cy, conf = ball_xy
@@ -243,6 +255,51 @@ def main():
     elapsed = time.time() - t_start
     print(f"First pass done: {processed} frames in {elapsed:.0f}s ({processed/elapsed:.1f} fps)")
 
+    # ── GOALKEEPER DETECTION ──────────────────────────────────────────
+    gk_track_ids = set()
+    gk_by_goal = {}  # {"left": track_id, "right": track_id}
+    if len(gk_positions) > 0 and len(goals) >= 8:
+        left_goal_cx = (goals[0][0] + goals[1][0]) / 2
+        left_goal_cy = (goals[0][1] + goals[1][1]) / 2
+        right_goal_cx = (goals[4][0] + goals[5][0]) / 2
+        right_goal_cy = (goals[4][1] + goals[5][1]) / 2
+
+        gk_distances = {}
+        for tid, positions in gk_positions.items():
+            if not positions:
+                continue
+            avg_x = sum(p[0] for p in positions) / len(positions)
+            avg_y = sum(p[1] for p in positions) / len(positions)
+
+            d_left = ((avg_x - left_goal_cx)**2 + (avg_y - left_goal_cy)**2) ** 0.5
+            d_right = ((avg_x - right_goal_cx)**2 + (avg_y - right_goal_cy)**2) ** 0.5
+            gk_distances[tid] = (d_left, d_right)
+
+        if gk_distances:
+            left_gk = min(gk_distances.keys(), key=lambda t: gk_distances[t][0])
+            right_gk = min(gk_distances.keys(), key=lambda t: gk_distances[t][1])
+
+            # Show top-3 closest to each goal for debugging
+            left_sorted = sorted(gk_distances.items(), key=lambda x: x[1][0])[:3]
+            right_sorted = sorted(gk_distances.items(), key=lambda x: x[1][1])[:3]
+            print(f"  GK candidates (left goal): {', '.join(f'#{t}={d[0]:.0f}px' for t,d in left_sorted)}")
+            print(f"  GK candidates (right goal): {', '.join(f'#{t}={d[1]:.0f}px' for t,d in right_sorted)}")
+            print(f"  Goal centers: left=({left_goal_cx:.0f},{left_goal_cy:.0f})"
+                  f" right=({right_goal_cx:.0f},{right_goal_cy:.0f})")
+            print(f"  Sampled {len(gk_positions)} tracks over {gk_frames_collected} frames")
+
+            # Only tag if within 500px of goal center (avoids false positives on small fields)
+            if gk_distances[left_gk][0] < 500:
+                gk_track_ids.add(left_gk)
+                gk_by_goal["left"] = left_gk
+            if gk_distances[right_gk][1] < 500:
+                gk_track_ids.add(right_gk)
+                gk_by_goal["right"] = right_gk
+
+            print(f"  Goalkeepers left: #{left_gk} (dist={gk_distances[left_gk][0]:.0f}px)"
+                  f"{', right: #' + str(right_gk) if right_gk != left_gk else ' (same as left)'}"
+                  f" (dist={gk_distances[right_gk][1]:.0f}px)")
+
     # ── POST-PROCESSING ───────────────────────────────────────────────
     if args.post_process:
         print("\nPost-processing…")
@@ -258,6 +315,7 @@ def main():
     # Attach team to each detection
     for det in all_players.values():
         det["team"] = team_labels.get(det["track_id"], "Unknown")
+        det["goalkeeper"] = det["track_id"] in gk_track_ids
 
     # Build a lookup: frame -> [detection, ...] for the render pass
     frame_players = defaultdict(list)
@@ -323,13 +381,18 @@ def main():
 
             # Use team colour for players, class colour for referees
             team = det.get("team", "Unknown")
-            if cls_id == PLAYER:
+            is_gk = det.get("goalkeeper", False)
+            if is_gk:
+                colour = (180, 50, 255)     # purple for all goalkeepers
+            elif cls_id == PLAYER:
                 colour = RENDER_TEAM_COLORS.get(team, (200, 200, 200))
             else:
                 colour = CLASS_COLOURS.get(cls_id, (200, 200, 200))
 
             cv2.rectangle(annotated, (x1, y1), (x2, y2), colour, 3)
-            if team == "My Team":
+            if is_gk:
+                tag = " GK"
+            elif team == "My Team":
                 tag = " [M]"
             elif team == "Team 2":
                 tag = " [T2]"
@@ -454,6 +517,8 @@ def main():
         "ball_trail": ball_trail,
         "stats": stats,
         "team_labels": team_labels,
+        "goalkeeper_ids": sorted(gk_track_ids),
+        "gk_by_goal": gk_by_goal,
         "heatmap": str(heatmap_path) if heatmap_path else None,
     }
     with open(json_path, "w") as f:
