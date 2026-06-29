@@ -34,10 +34,12 @@ RENDER_TEAM_COLORS = {
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Re-render video filtered to one team")
+    ap = argparse.ArgumentParser(description="Re-render video filtered to one team or with excluded tracks")
     ap.add_argument("--results", required=True, help="Path to results JSON from process.py")
-    ap.add_argument("--team", required=True, choices=["My Team", "Team 2"],
-                    help="Which team's players to show")
+    ap.add_argument("--team", default=None, choices=["My Team", "Team 2"],
+                    help="Which team's players to show (omit to show all)")
+    ap.add_argument("--exclude-tracks", default=None,
+                    help="Comma-separated track IDs to exclude from rendering")
     ap.add_argument("--attacking-goal", default=None, choices=["left", "right"],
                     help="Which goal your team is attacking (determines which GK is yours)")
     ap.add_argument("--output-dir", default=None, help="Output directory")
@@ -52,30 +54,55 @@ def main():
         print(f"Source video not found: {video_path}")
         sys.exit(1)
 
-    # Determine which goalkeepers to include
-    gk_track_ids_in_data = set(data.get("goalkeeper_ids", []))
-    gk_by_goal = data.get("gk_by_goal", {})
-    gk_to_include = set()
-    if args.attacking_goal and gk_by_goal:
-        # GK defends the OPPOSITE goal from where we're attacking
-        defending_goal = "right" if args.attacking_goal == "left" else "left"
-        our_gk_tid = gk_by_goal.get(defending_goal)
-        if our_gk_tid:
-            gk_to_include.add(our_gk_tid)
-            print(f"  Including our GK: #{our_gk_tid} (defends {defending_goal} goal)")
-    else:
-        # No attacking direction = show all GKs
-        gk_to_include = gk_track_ids_in_data
-
-    # Build frame -> players lookup, filtered to selected team + our GK
-    team_tracks = set()
+    # Determine which tracks to render
     all_detections = data.get("detections", [])
+    all_tracks = set()
+    for det in all_detections:
+        tid = det.get("track_id", -1)
+        if tid > 0:
+            all_tracks.add(tid)
+
+    # Step 1: apply --team filter
+    tracks_to_render = set()
+    if args.team:
+        gk_track_ids_in_data = set(data.get("goalkeeper_ids", []))
+        gk_by_goal = data.get("gk_by_goal", {})
+        gk_to_include = set()
+        if args.attacking_goal and gk_by_goal:
+            defending_goal = "right" if args.attacking_goal == "left" else "left"
+            our_gk_tid = gk_by_goal.get(defending_goal)
+            if our_gk_tid:
+                gk_to_include.add(our_gk_tid)
+                print(f"  Including our GK: #{our_gk_tid} (defends {defending_goal} goal)")
+        else:
+            gk_to_include = gk_track_ids_in_data
+
+        for det in all_detections:
+            team = det.get("team", "Unknown")
+            is_gk = det.get("goalkeeper", False)
+            is_our_gk = det["track_id"] in gk_to_include
+            if team == args.team or is_our_gk:
+                # When we know which GK is ours (gk_to_include is non-empty),
+                # exclude the OTHER goalkeeper even if their team label
+                # happens to match — GKs wear different jerseys and are
+                # often misclassified into the wrong team cluster.
+                if is_gk and gk_to_include and not is_our_gk:
+                    continue
+                tracks_to_render.add(det["track_id"])
+    else:
+        tracks_to_render = set(all_tracks)
+
+    # Step 2: apply --exclude-tracks filter
+    exclude_tracks = set()
+    if args.exclude_tracks:
+        exclude_tracks = set(int(x.strip()) for x in args.exclude_tracks.split(",") if x.strip())
+        tracks_to_render -= exclude_tracks
+        print(f"  Excluding {len(exclude_tracks)} track(s): {sorted(exclude_tracks)}")
+
+    # Build frame -> players lookup
     frame_players = defaultdict(list)
     for det in all_detections:
-        team = det.get("team", "Unknown")
-        is_our_gk = det["track_id"] in gk_to_include
-        if team == args.team or is_our_gk:
-            team_tracks.add(det["track_id"])
+        if det["track_id"] in tracks_to_render:
             frame_players[det["frame"]].append(det)
 
     ball_trail = data.get("ball_trail", [])
@@ -104,14 +131,24 @@ def main():
     frame_skip = max(1, min((frames_in_data[i+1] - frames_in_data[i] for i in range(len(frames_in_data)-1)), default=1))
 
     print(f"Re-rendering video: {w}x{h} @ {fps:.1f} fps, {total} frames, skip={frame_skip}")
-    print(f"Filter: {args.team} ({len(team_tracks)} players, {len(frame_players)} frames with detections)")
+    if args.team:
+        print(f"Filter: {args.team} ({len(tracks_to_render)} players, {len(frame_players)} frames with detections)")
+    elif args.exclude_tracks:
+        print(f"Excluding {len(exclude_tracks)} tracks, keeping {len(tracks_to_render)} players")
+    else:
+        print(f"Rendering all {len(tracks_to_render)} players, {len(frame_players)} frames")
 
     # Output path
     out_dir = Path(args.output_dir) if args.output_dir else Path(args.results).parent
     stem = Path(video_path).stem
-    team_slug = args.team.lower().replace(" ", "_")
-    attack_slug = f"_{args.attacking_goal}" if args.attacking_goal else ""
-    out_path = str(out_dir / f"{stem}_filtered_{team_slug}{attack_slug}.mp4")
+    if args.team:
+        team_slug = args.team.lower().replace(" ", "_")
+        attack_slug = f"_{args.attacking_goal}" if args.attacking_goal else ""
+        out_path = str(out_dir / f"{stem}_filtered_{team_slug}{attack_slug}.mp4")
+    elif args.exclude_tracks:
+        out_path = str(out_dir / f"{stem}_clean.mp4")
+    else:
+        out_path = str(out_dir / f"{stem}_rendered.mp4")
     codec = cv2.VideoWriter_fourcc(*"mp4v")
 
     writer = cv2.VideoWriter(out_path, codec, fps / frame_skip, (w, h))

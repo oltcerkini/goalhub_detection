@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 import uuid
+from collections import defaultdict
 from pathlib import Path
 
 import cv2
@@ -385,8 +386,10 @@ async def re_render(data: dict):
     attack_slug = f"_{attacking_goal}" if attacking_goal else ""
     filtered_path = OUTPUT_DIR / f"{stem}_filtered_{team_slug}{attack_slug}.mp4"
 
-    # Skip if already rendered
-    if filtered_path.exists():
+    # Skip if already rendered (but only if we have no active exclusions, otherwise
+    # re-render to ensure the excluded tracks are also filtered out)
+    excluded = task.get("excluded_tracks", [])
+    if filtered_path.exists() and not excluded:
         return {"video_url": f"/api/media/{filtered_path.name}", "team": team}
 
     # Run render_filtered.py
@@ -399,6 +402,10 @@ async def re_render(data: dict):
     if attacking_goal:
         cmd.extend(["--attacking-goal", attacking_goal])
 
+    # Also pass any previously excluded tracks from clean-render
+    if excluded:
+        cmd.extend(["--exclude-tracks", ",".join(str(t) for t in excluded)])
+
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
         if result.returncode != 0:
@@ -410,6 +417,161 @@ async def re_render(data: dict):
         raise HTTPException(500, "Re-rendered video not found at expected path")
 
     return {"video_url": f"/api/media/{filtered_path.name}", "team": team}
+
+
+# ── Review frame ────────────────────────────────────────────────────────────
+
+@app.get("/api/review-frame/{task_id}")
+async def get_review_frame(task_id: str):
+    """Generate a review frame showing all detected player tracks.
+
+    Returns the frame as a JPEG URL and a JSON array of detections
+    (track_id, bbox, team, confidence) so the frontend can render
+    clickable overlays.
+    """
+    task = tasks.get(task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    if task["status"] != "completed":
+        raise HTTPException(400, "Task not completed yet")
+
+    results_path = task.get("results_path")
+    if not results_path or not Path(results_path).exists():
+        raise HTTPException(404, "Results file not found")
+
+    with open(results_path) as f:
+        data = json.load(f)
+
+    video_path = data.get("video")
+    if not video_path or not Path(video_path).exists():
+        raise HTTPException(404, "Source video not found in results")
+
+    # Find the frame with the most unique track_ids (best review frame)
+    frame_tracks = defaultdict(set)
+    for det in data.get("detections", []):
+        tid = det.get("track_id", -1)
+        if tid > 0:
+            frame_tracks[det["frame"]].add(tid)
+
+    if not frame_tracks:
+        raise HTTPException(400, "No player detections found in results")
+
+    best_frame = max(frame_tracks, key=lambda f: len(frame_tracks[f]))
+
+    # Extract frame from video
+    frame = _extract_frame(video_path, best_frame)
+    if frame is None:
+        raise HTTPException(500, "Failed to extract frame from video")
+
+    # Get player detections for this frame only
+    players_in_frame = [
+        det for det in data.get("detections", [])
+        if det.get("frame") == best_frame and det.get("track_id", -1) > 0
+    ]
+
+    # Build detection data for the frontend
+    detections_json = []
+    for p in players_in_frame:
+        detections_json.append({
+            "track_id": p["track_id"],
+            "bbox": p["bbox"],
+            "team": p.get("team", "Unknown"),
+            "confidence": p.get("confidence", 0),
+        })
+
+    # Save the review frame as JPEG
+    frame_jpg_name = f"review_{task_id}.jpg"
+    frame_jpg_path = OUTPUT_DIR / frame_jpg_name
+    _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    with open(frame_jpg_path, "wb") as f:
+        f.write(buf.tobytes())
+
+    # Count unique track_ids across the whole video
+    all_track_ids = set()
+    for det in data.get("detections", []):
+        tid = det.get("track_id", -1)
+        if tid > 0:
+            all_track_ids.add(tid)
+
+    return {
+        "frame_url": f"/api/media/{frame_jpg_name}",
+        "detections": detections_json,
+        "frame_idx": best_frame,
+        "img_width": frame.shape[1],
+        "img_height": frame.shape[0],
+        "total_player_tracks": len(all_track_ids),
+    }
+
+
+# ── Clean render (exclude tracks) ───────────────────────────────────────────
+
+@app.post("/api/clean-render")
+async def clean_render(data: dict):
+    """Re-render the video excluding specified player track IDs.
+
+    Runs a lightweight re-render from the existing results JSON — no
+    re-detection, just skipping the excluded tracks during rendering.
+    Stores the exclusion list in task state so subsequent team-filter
+    re-renders also respect the exclusions.
+    """
+    task_id = data.get("task_id")
+    exclude_tracks = data.get("exclude_tracks", [])
+
+    if not task_id:
+        raise HTTPException(400, "Missing task_id")
+    if not exclude_tracks:
+        raise HTTPException(400, "No tracks to exclude")
+
+    task = tasks.get(task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    if task["status"] != "completed":
+        raise HTTPException(400, "Task not completed yet")
+
+    results_path = task.get("results_path")
+    if not results_path or not Path(results_path).exists():
+        raise HTTPException(404, "Results file not found")
+
+    video_name = task.get("video_name", "")
+    stem = Path(video_name).stem
+    clean_path = OUTPUT_DIR / f"{stem}_clean.mp4"
+
+    # Skip if already rendered
+    if clean_path.exists():
+        return {"video_url": f"/api/media/{clean_path.name}", "excluded_count": len(exclude_tracks)}
+
+    # Run render_filtered.py with --exclude-tracks
+    cmd = [
+        sys.executable, str(BASE_DIR / "render_filtered.py"),
+        "--results", results_path,
+        "--exclude-tracks", ",".join(str(t) for t in exclude_tracks),
+        "--output-dir", str(OUTPUT_DIR),
+    ]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        if result.returncode != 0:
+            raise HTTPException(500, f"Clean render failed: {result.stderr[-1000:]}")
+    except subprocess.TimeoutExpired:
+        raise HTTPException(500, "Clean render timed out (>10 minutes)")
+
+    # Find output from the script's OUTPUT_PATH: marker
+    output_path = None
+    for line in result.stdout.split("\n"):
+        if line.startswith("OUTPUT_PATH:"):
+            output_path = line.split(":", 1)[1].strip()
+            break
+
+    if not output_path or not Path(output_path).exists():
+        raise HTTPException(500, "Clean rendered video not found at expected path")
+
+    # Store excluded tracks in task state
+    tasks[task_id]["excluded_tracks"] = list(exclude_tracks)
+
+    return {
+        "video_url": f"/api/media/{Path(output_path).name}",
+        "excluded_count": len(exclude_tracks),
+    }
 
 
 # ── List tasks ─────────────────────────────────────────────────────────────
