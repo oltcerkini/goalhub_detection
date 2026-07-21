@@ -321,7 +321,7 @@ class StatsComputer:
         Args:
             ball_trail: list of (x, y, frame, conf)
             player_detections: list of dicts with track_id, frame, bbox
-            team_labels: dict track_id -> team name ('My Team' / 'Team 2' / etc.)
+            team_labels: dict track_id -> team name ('Team A' / 'Team B' / etc.)
 
         Returns:
             dict with frames_per_team, percentage_per_team, total_frames

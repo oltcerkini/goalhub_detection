@@ -158,8 +158,8 @@ class PostProcessor:
     def _smooth_teams(self, all_players):
         """Assign each track the majority team across all frames."""
         # Collect team votes per track
-        team_votes = defaultdict(lambda: {"My Team": 0, "Team 2": 0, "Team 1": 0,
-                                          "GK My Team": 0, "GK Team 2": 0, "GK Team 1": 0,
+        team_votes = defaultdict(lambda: {"Team A": 0, "Team B": 0,
+                                          "GK Team A": 0, "GK Team B": 0,
                                           "Referee": 0, "Unknown": 0})
 
         for det in all_players.values():
@@ -176,16 +176,16 @@ class PostProcessor:
             if total < 3:
                 continue
 
-            # Count outfield teams (non-GK) and GK variants
-            outfield = {"My Team": votes["My Team"], "Team 1": votes["Team 1"], "Team 2": votes["Team 2"]}
-            gk = {"GK My Team": votes["GK My Team"], "GK Team 1": votes["GK Team 1"], "GK Team 2": votes["GK Team 2"]}
+            # Count outfield teams and GK variants
+            outfield = {"Team A": votes["Team A"], "Team B": votes["Team B"]}
+            gk = {"GK Team A": votes["GK Team A"], "GK Team B": votes["GK Team B"]}
 
             # Map GK variants to their base team
-            gk_to_team = {"GK My Team": "My Team", "GK Team 1": "Team 1", "GK Team 2": "Team 2"}
+            gk_to_team = {"GK Team A": "Team A", "GK Team B": "Team B"}
 
             # Count total per base team (outfield + GK)
             team_totals = {}
-            for team_name in ["My Team", "Team 1", "Team 2"]:
+            for team_name in ["Team A", "Team B"]:
                 team_totals[team_name] = outfield[team_name]
             for gk_name, base_name in gk_to_team.items():
                 team_totals[base_name] = team_totals.get(base_name, 0) + gk[gk_name]

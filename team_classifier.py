@@ -10,7 +10,12 @@ from sklearn.cluster import KMeans
 
 
 class TeamClassifier:
-    """Classifies tracked players into exactly 'My Team' / 'Team 2'."""
+    """Classifies tracked players into exactly 2 teams by jersey colour.
+
+    Labels are neutral ("Team A" / "Team B") since KMeans cluster indices
+    are arbitrary. The user picks which team is theirs in the post-processing
+    team filter modal (where they can see actual track IDs).
+    """
 
     def __init__(self, min_samples=10, sample_every=5,
                  torso_ratio=(0.15, 0.55), sat_threshold=35,
@@ -23,7 +28,6 @@ class TeamClassifier:
         # Per-frame: frame_idx -> {track_id -> mean_hsv}
         self._frame_data = {}
         self._labels = {}
-        self._my_team_idx = 0
 
     def sample(self, frame, track_id, bbox, frame_idx):
         """Sample HSV centre-torso, store per-frame mean for this track."""
@@ -102,14 +106,11 @@ class TeamClassifier:
 
         for i, tid in enumerate(tids):
             c = int(kmeans.labels_[i])
-            self._labels[tid] = "My Team" if c == self._my_team_idx else "Team 2"
+            self._labels[tid] = "Team A" if c == 0 else "Team B"
 
-        n_my = sum(1 for v in self._labels.values() if v == "My Team")
-        n_t2 = sum(1 for v in self._labels.values() if v == "Team 2")
-        print(f"  TeamClassifier: {n_my} My Team, {n_t2} Team 2 ({len(tids)} tracks)")
-
-    def set_my_team(self, team_index):
-        self._my_team_idx = team_index
+        n_a = sum(1 for v in self._labels.values() if v == "Team A")
+        n_b = sum(1 for v in self._labels.values() if v == "Team B")
+        print(f"  TeamClassifier: {n_a} Team A, {n_b} Team B ({len(tids)} tracks)")
 
     def get_team(self, track_id):
         return self._labels.get(track_id, "Unknown")

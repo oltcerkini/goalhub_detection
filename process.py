@@ -22,7 +22,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from detector import YOLODetector, PLAYER, BALL, REFEREE
-from ball_detector import BallDetector
+from ball_detector import BallDetector, validate_ball_trail
 
 from player_tracker import PlayerTracker
 from stats_computer import PitchMapper, StatsComputer
@@ -47,8 +47,8 @@ def main():
     ap.add_argument("--skip", type=int, default=3)
     ap.add_argument("--model", default=None,
                     help="Path to YOLO .pt model")
-    ap.add_argument("--imgsz", type=int, default=3840,
-                    help="YOLO inference resolution (longest edge, default: 3840 for 4K). "
+    ap.add_argument("--imgsz", type=int, default=1280,
+                    help="YOLO inference resolution (longest edge, default: 1280). "
                          "Higher = better small-object detection but slower.")
     ap.add_argument("--gamma", type=float, default=0.85,
                     help="Gamma correction (1.0 = no change, <1 brightens shadows, >1 darkens)")
@@ -137,8 +137,10 @@ def main():
     processed = 0
     t_start = time.time()
     team_classifier = TeamClassifier()
-    if my_team is not None:
-        team_classifier.set_my_team(my_team)
+    # Note: we do NOT set a "my team" bias from calibration here because
+    # KMeans cluster indices are arbitrary. Team selection happens after
+    # processing in the web app's team filter modal, where the user can
+    # see actual track IDs to pick the correct team.
 
     # ── Goalkeeper detection accumulators ──────────────────────────────
     GK_FRAME_SAMPLE = 30
@@ -168,17 +170,21 @@ def main():
         # Note: no bbox expansion here — it makes boxes spill outside the pitch visually.
         # YOLO at 3840px gives tight but accurate boxes.
 
-        # Ball detection: try full-frame YOLO first, then fallback pipeline
+        # Ball detection: only accept full-frame YOLO ball when highly confident.
+        # The COCO "sports ball" class at the default 0.06 threshold produces
+        # too many false positives (any round object gets labelled "ball").
         ball_xy = None
         if full_dets is not None:
             ball_from_yolo = detector.get_ball(full_dets)
             if ball_from_yolo is not None and len(ball_from_yolo) > 0:
                 best = ball_from_yolo.confidence.argmax()
-                bx1, by1, bx2, by2 = ball_from_yolo.xyxy[best]
-                b_cx = (bx1 + bx2) / 2.0
-                b_cy = (by1 + by2) / 2.0
                 b_conf = float(ball_from_yolo.confidence[best])
-                ball_xy = (b_cx, b_cy, b_conf)
+                if b_conf >= 0.5:  # trust COCO ball only when confident
+                    bx1, by1, bx2, by2 = ball_from_yolo.xyxy[best]
+                    b_cx = (bx1 + bx2) / 2.0
+                    b_cy = (by1 + by2) / 2.0
+                    ball_xy = (b_cx, b_cy, b_conf)
+                    # print(f"  Full-frame YOLO ball: conf={b_conf:.2f}")
 
         # Fallback: BallDetector's crop-based YOLO + motion blob + Kalman pipeline
         # Pass the YOLO ball as a hint so it can skip the expensive pipeline if valid
@@ -255,6 +261,38 @@ def main():
     elapsed = time.time() - t_start
     print(f"First pass done: {processed} frames in {elapsed:.0f}s ({processed/elapsed:.1f} fps)")
 
+    # ── BALL TRAIL VALIDATION ──────────────────────────────────────────
+    # Remove false-positive trajectory fragments (white boots, lines, etc.)
+    # that don't form consistent, multi-frame ball trajectories.
+    n_before = len(ball_trail)
+    ball_trail = validate_ball_trail(ball_trail)
+    n_removed = n_before - len(ball_trail)
+    if n_removed:
+        print(f"  Trail validation: removed {n_removed} false-positive ball detections"
+              f" ({n_before} → {len(ball_trail)})")
+
+    # ── BALL TRAIL GAP-FILLING ─────────────────────────────────────────
+    # Linearly interpolate across small gaps (≤5 frames) so the ball trail
+    # is continuous during rendering rather than flickering on/off.
+    if len(ball_trail) >= 2:
+        filled_trail = [ball_trail[0]]
+        for i in range(1, len(ball_trail)):
+            prev = ball_trail[i - 1]
+            curr = ball_trail[i]
+            prev_frame = prev[2]
+            curr_frame = curr[2]
+            gap = curr_frame - prev_frame
+            if 1 < gap <= 5:
+                # Interpolate missing frames
+                for f in range(1, gap):
+                    frac = f / gap
+                    ix = prev[0] + (curr[0] - prev[0]) * frac
+                    iy = prev[1] + (curr[1] - prev[1]) * frac
+                    iconf = prev[3] * (1.0 - frac) + curr[3] * frac
+                    filled_trail.append((ix, iy, prev_frame + f, iconf))
+            filled_trail.append(curr)
+        ball_trail = filled_trail
+
     # ── GOALKEEPER DETECTION ──────────────────────────────────────────
     gk_track_ids = set()
     gk_by_goal = {}  # {"left": track_id, "right": track_id}
@@ -324,8 +362,8 @@ def main():
 
     # Team colours for rendering
     RENDER_TEAM_COLORS = {
-        "My Team": (0, 180, 255),     # orange
-        "Team 2": (255, 50, 100),      # pinkish-red
+        "Team A": (0, 180, 255),     # orange
+        "Team B": (255, 50, 100),      # pinkish-red
         "Referee": (255, 255, 50),     # cyan/light blue — distinct from both teams
         "Unknown": (200, 200, 200),    # grey
     }
@@ -382,7 +420,9 @@ def main():
             # Use team colour for players, class colour for referees
             team = det.get("team", "Unknown")
             is_gk = det.get("goalkeeper", False)
-            if is_gk:
+            if team == "Referee":
+                colour = (255, 255, 255)    # white for referees
+            elif is_gk:
                 colour = (180, 50, 255)     # purple for all goalkeepers
             elif cls_id == PLAYER:
                 colour = RENDER_TEAM_COLORS.get(team, (200, 200, 200))
@@ -390,12 +430,14 @@ def main():
                 colour = CLASS_COLOURS.get(cls_id, (200, 200, 200))
 
             cv2.rectangle(annotated, (x1, y1), (x2, y2), colour, 3)
-            if is_gk:
+            if team == "Referee":
+                tag = " REF"
+            elif is_gk:
                 tag = " GK"
-            elif team == "My Team":
-                tag = " [M]"
-            elif team == "Team 2":
-                tag = " [T2]"
+            elif team == "Team A":
+                tag = " [A]"
+            elif team == "Team B":
+                tag = " [B]"
             else:
                 tag = ""
             label = f"#{tid}{tag}"
@@ -462,7 +504,7 @@ def main():
         import subprocess as _sp
         _sp.run(
             ["ffmpeg", "-y", "-i", out_path,
-             "-c:v", "libx264", "-preset", "slow", "-crf", "18",
+             "-c:v", "libx264", "-preset", "medium", "-crf", "23",
              "-maxrate", "50M", "-bufsize", "100M",
              "-movflags", "+faststart",
              opt_path],

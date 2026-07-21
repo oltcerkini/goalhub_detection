@@ -6,7 +6,7 @@ Reads the results JSON from a completed GoalHub analysis and re-renders
 the video showing only the selected team's player bounding boxes.
 
 Usage:
-    python render_filtered.py --results path/to/results.json --team "My Team"
+    python render_filtered.py --results path/to/results.json --team "Team A"
 """
 
 import argparse
@@ -26,8 +26,8 @@ from detector import PLAYER
 from stats_computer import PitchMapper
 
 RENDER_TEAM_COLORS = {
-    "My Team": (0, 180, 255),     # orange
-    "Team 2": (255, 50, 100),      # pinkish-red
+    "Team A": (0, 180, 255),     # orange
+    "Team B": (255, 50, 100),      # pinkish-red
     "Referee": (255, 255, 50),     # cyan/light blue
     "Unknown": (200, 200, 200),    # grey
 }
@@ -36,7 +36,7 @@ RENDER_TEAM_COLORS = {
 def main():
     ap = argparse.ArgumentParser(description="Re-render video filtered to one team or with excluded tracks")
     ap.add_argument("--results", required=True, help="Path to results JSON from process.py")
-    ap.add_argument("--team", default=None, choices=["My Team", "Team 2"],
+    ap.add_argument("--team", default=None, choices=["Team A", "Team B"],
                     help="Which team's players to show (omit to show all)")
     ap.add_argument("--exclude-tracks", default=None,
                     help="Comma-separated track IDs to exclude from rendering")
@@ -92,12 +92,26 @@ def main():
     else:
         tracks_to_render = set(all_tracks)
 
-    # Step 2: apply --exclude-tracks filter
+    # Step 2: identify referee tracks from JSON data (team="Referee" set by mark-referees)
+    referee_ids_from_data = set()
+    for det in all_detections:
+        if det.get("team") == "Referee" and det.get("track_id", -1) > 0:
+            referee_ids_from_data.add(det["track_id"])
+    if referee_ids_from_data:
+        print(f"  Referees from data: {sorted(referee_ids_from_data)}")
+
+    # Step 3: apply --exclude-tracks filter
     exclude_tracks = set()
     if args.exclude_tracks:
         exclude_tracks = set(int(x.strip()) for x in args.exclude_tracks.split(",") if x.strip())
         tracks_to_render -= exclude_tracks
         print(f"  Excluding {len(exclude_tracks)} track(s): {sorted(exclude_tracks)}")
+
+    # Always include referee tracks (even when team-filtering), unless explicitly excluded
+    if referee_ids_from_data:
+        tracks_to_render.update(referee_ids_from_data - exclude_tracks)
+
+    print(f"  Rendering {len(tracks_to_render)} tracks: {sorted(tracks_to_render)}")
 
     # Build frame -> players lookup
     frame_players = defaultdict(list)
@@ -197,7 +211,9 @@ def main():
 
             team = det.get("team", "Unknown")
             is_gk = det.get("goalkeeper", False)
-            if is_gk:
+            if team == "Referee":
+                colour = (255, 255, 255)    # white for referees
+            elif is_gk:
                 colour = (180, 50, 255)     # purple for all goalkeepers
             elif cls_id == PLAYER:
                 colour = RENDER_TEAM_COLORS.get(team, (200, 200, 200))
@@ -205,12 +221,14 @@ def main():
                 colour = (0, 255, 0)
 
             cv2.rectangle(annotated, (x1, y1), (x2, y2), colour, 3)
-            if is_gk:
+            if team == "Referee":
+                tag = " REF"
+            elif is_gk:
                 tag = " GK"
-            elif team == "My Team":
-                tag = " [M]"
-            elif team == "Team 2":
-                tag = " [T2]"
+            elif team == "Team A":
+                tag = " [A]"
+            elif team == "Team B":
+                tag = " [B]"
             else:
                 tag = ""
             label = f"#{tid}{tag}"
@@ -276,7 +294,7 @@ def main():
         h264_path = out_path.replace(".mp4", "_h264.mp4")
         subprocess.run(
             ["ffmpeg", "-y", "-i", out_path,
-             "-c:v", "libx264", "-preset", "slow", "-crf", "18",
+             "-c:v", "libx264", "-preset", "medium", "-crf", "23",
              "-maxrate", "50M", "-bufsize", "100M",
              "-movflags", "+faststart",
              h264_path],

@@ -188,6 +188,7 @@ def _launch_processing(task_id, video_path, cal_path, output_path,
         "--calibration", cal_path,
         "--threshold", str(threshold),
         "--skip", str(skip),
+        "--imgsz", "1280",
         "--gamma", "0.85",
         "--output-dir", str(OUTPUT_DIR),
     ]
@@ -283,6 +284,11 @@ async def get_results(task_id: str):
     else:
         data["heatmap_url"] = None
 
+    # Attach referee track IDs from task state (set via mark-referees)
+    referee_ids = task.get("referee_track_ids", [])
+    if referee_ids:
+        data["referee_track_ids"] = referee_ids
+
     return data
 
 
@@ -357,13 +363,109 @@ def _find_output_video(task) -> str | None:
     return None
 
 
+# ── Mark Referees ─────────────────────────────────────────────────────────
+
+@app.post("/api/mark-referees")
+async def mark_referees(data: dict):
+    """Store referee track IDs and update results JSON so renders use 'Referee' color."""
+    task_id = data.get("task_id")
+    referee_track_ids = data.get("referee_track_ids", [])
+
+    if not task_id:
+        raise HTTPException(400, "Missing task_id")
+
+    task = tasks.get(task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+
+    tasks[task_id]["referee_track_ids"] = list(referee_track_ids)
+
+    # Update the results JSON on disk — set team="Referee" for referee tracks
+    results_path = task.get("results_path")
+    if results_path and Path(results_path).exists():
+        referee_set = set(referee_track_ids)
+        with open(results_path) as f:
+            data = json.load(f)
+        changed = 0
+        for det in data.get("detections", []):
+            if det.get("track_id") in referee_set and det.get("team") != "Referee":
+                det["team"] = "Referee"
+                changed += 1
+        with open(results_path, "w") as f:
+            json.dump(data, f, indent=2, default=str)
+        print(f"  Referees stored: {referee_track_ids} — {changed} detections updated")
+
+    # Invalidate cached videos so re-renders pick up referee coloring
+    video_name = task.get("video_name", "")
+    if video_name:
+        stem = Path(video_name).stem
+        for f in OUTPUT_DIR.glob(f"{stem}_clean*.mp4"):
+            f.unlink()
+            print(f"  Invalidated: {f.name}")
+        for f in OUTPUT_DIR.glob(f"{stem}_filtered_*.mp4"):
+            f.unlink()
+            print(f"  Invalidated: {f.name}")
+
+    return {"status": "ok", "referee_count": len(referee_track_ids)}
+
+
+# ── Refresh all-tracks video (after referee marking) ──────────────────────
+
+@app.post("/api/refresh-all")
+async def refresh_all(data: dict):
+    """Re-render all tracks after referee marking (so 'Show All' shows refs in white)."""
+    task_id = data.get("task_id")
+    if not task_id:
+        raise HTTPException(400, "Missing task_id")
+
+    task = tasks.get(task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    if task["status"] != "completed":
+        raise HTTPException(400, "Task not completed yet")
+
+    results_path = task.get("results_path")
+    if not results_path or not Path(results_path).exists():
+        raise HTTPException(404, "Results file not found")
+
+    video_name = task.get("video_name", "")
+    stem = Path(video_name).stem
+
+    excluded = task.get("excluded_tracks", [])
+    cmd = [
+        sys.executable, str(BASE_DIR / "render_filtered.py"),
+        "--results", results_path,
+        "--output-dir", str(OUTPUT_DIR),
+    ]
+    if excluded:
+        cmd.extend(["--exclude-tracks", ",".join(str(t) for t in excluded)])
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        if result.returncode != 0:
+            raise HTTPException(500, f"Refresh failed: {result.stderr[-1000:]}")
+    except subprocess.TimeoutExpired:
+        raise HTTPException(500, "Refresh timed out (>10 minutes)")
+
+    output_path = None
+    for line in result.stdout.split("\n"):
+        if line.startswith("OUTPUT_PATH:"):
+            output_path = line.split(":", 1)[1].strip()
+            break
+
+    if not output_path or not Path(output_path).exists():
+        raise HTTPException(500, "Refreshed video not found")
+
+    return {"video_url": f"/api/media/{Path(output_path).name}"}
+
+
 # ── Re-render (team filter) ─────────────────────────────────────────────────
 
 @app.post("/api/re-render")
 async def re_render(data: dict):
     """Re-render the processed video filtered to one team."""
     task_id = data.get("task_id")
-    team = data.get("team")  # "My Team" or "Team 2"
+    team = data.get("team")  # "Team A" or "Team B"
     attacking_goal = data.get("attacking_goal")  # "left" or "right" (optional)
 
     if not task_id or not team:
@@ -386,11 +488,12 @@ async def re_render(data: dict):
     attack_slug = f"_{attacking_goal}" if attacking_goal else ""
     filtered_path = OUTPUT_DIR / f"{stem}_filtered_{team_slug}{attack_slug}.mp4"
 
-    # Skip if already rendered (but only if we have no active exclusions, otherwise
-    # re-render to ensure the excluded tracks are also filtered out)
+    # Delete any cached filtered video so re-render always picks up latest JSON
+    if filtered_path.exists():
+        filtered_path.unlink()
+        print(f"  Re-render: deleted cached {filtered_path.name}")
+
     excluded = task.get("excluded_tracks", [])
-    if filtered_path.exists() and not excluded:
-        return {"video_url": f"/api/media/{filtered_path.name}", "team": team}
 
     # Run render_filtered.py
     cmd = [
@@ -405,6 +508,7 @@ async def re_render(data: dict):
     # Also pass any previously excluded tracks from clean-render
     if excluded:
         cmd.extend(["--exclude-tracks", ",".join(str(t) for t in excluded)])
+    # Note: referee tracks are handled via the results JSON (team="Referee" set by mark-referees)
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
@@ -547,6 +651,7 @@ async def clean_render(data: dict):
         "--exclude-tracks", ",".join(str(t) for t in exclude_tracks),
         "--output-dir", str(OUTPUT_DIR),
     ]
+    # Note: referee tracks are handled via the results JSON (team="Referee" set by mark-referees)
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
