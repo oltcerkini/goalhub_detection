@@ -28,9 +28,9 @@ class YOLODetector:
     """
 
     # Default per-class confidence thresholds (used when conf=None)
-    DEFAULT_CONF = {PLAYER: 0.20, BALL: 0.06, REFEREE: 0.20}
+    DEFAULT_CONF = {PLAYER: 0.10, BALL: 0.06, REFEREE: 0.20}
 
-    def __init__(self, model_path=None, conf=0.25, iou=0.5, imgsz=2560,
+    def __init__(self, model_path=None, conf=0.25, iou=0.7, imgsz=2560,
                  per_class_conf=None):
         """
         Args:
