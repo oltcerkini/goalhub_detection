@@ -32,20 +32,38 @@ OUTDIR = "equirect_test"
 # --------------------------------------------------------------------------- #
 # Real-video path
 # --------------------------------------------------------------------------- #
-def extract_frames(video_path, frames):
+def extract_frames(video_path, frames=FRAMES, times=None, crop=None):
+    """Grab frames by index, or by timestamp (`times`, seconds). `crop` is
+    (x, y, w, h) applied to every frame — needed for footage letterboxed inside
+    a 16:9 frame (e.g. VR180 streams padded to 3840x2160)."""
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise RuntimeError(f"cannot open video: {video_path}")
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     out = {}
-    for f in frames:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, f)
-        ok, img = cap.read()
-        if not ok:
-            raise RuntimeError(f"could not read frame {f} (video has {total})")
-        out[f] = img
+    if times is not None:
+        for t in times:
+            cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000.0)
+            ok, img = cap.read()
+            if not ok:
+                raise RuntimeError(f"could not read t={t}s (video has {total} frames)")
+            out[f"{int(t)}s"] = _apply_crop(img, crop)
+    else:
+        for f in frames:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, f)
+            ok, img = cap.read()
+            if not ok:
+                raise RuntimeError(f"could not read frame {f} (video has {total})")
+            out[f] = _apply_crop(img, crop)
     cap.release()
     return out, total
+
+
+def _apply_crop(img, crop):
+    if not crop:
+        return img
+    x, y, w, h = crop
+    return img[y:y + h, x:x + w]
 
 
 def _hough_straightness(view):
@@ -85,7 +103,7 @@ def _inject_check(equirect, span):
         clean = equirect_to_perspective(equirect, yaw, 0, FOV, OUT_W, OUT_H, span)
         mark = equirect_to_perspective(marc, yaw, 0, FOV, OUT_W, OUT_H, span)
         if yaw == 0:
-            cv2.imwrite(os.path.join(OUTDIR, "inject_300_0.png"), mark)
+            cv2.imwrite(os.path.join(OUTDIR, "inject_view.png"), mark)
         d = mark.astype(int) - clean.astype(int)          # per-channel difference
         dB, dG, dR = d[:, :, 0], d[:, :, 1], d[:, :, 2]
         # Red line (0,0,255): R jumps up, G and B drop to ~0. Green line is the mirror.
@@ -110,15 +128,17 @@ def _inject_check(equirect, span):
                   f"(expect {OUT_W/2:.0f}), centreline dev p99 {np.percentile(dev,99):.1f} px")
 
 
-def run_real(video_path, span):
+def run_real(video_path, span, times=None, crop=None):
     os.makedirs(OUTDIR, exist_ok=True)
-    frames, total = extract_frames(video_path, FRAMES)
-    raw_h, raw_w = next(iter(frames.values())).shape[:2]
+    frames, total = extract_frames(video_path, times=times, crop=crop)
+    mid_key = list(frames)[len(frames) // 2]
+    mid = frames[mid_key]
+    raw_h, raw_w = mid.shape[:2]
     aspect = raw_w / raw_h
-    guess = "360° full-sphere" if 1.8 <= aspect <= 2.2 else \
-            "180° hemisphere" if 0.9 <= aspect <= 1.1 else "unclear"
-    print(f"[resolution] raw equirect: {raw_w}x{raw_h}  "
-          f"(aspect {aspect:.2f}:1 -> {guess}; frames total={total}; using span={span:.0f})")
+    kind = "180° hemisphere (VR180)" if span == 180 else \
+           "360° full-sphere" if span == 360 else f"{span:.0f}° span"
+    print(f"[resolution] raw source: {total} frames; cropped equirect: {raw_w}x{raw_h} "
+          f"(aspect {aspect:.2f}:1; treating as {kind})")
 
     saved = []
     for f, img in frames.items():
@@ -131,16 +151,16 @@ def run_real(video_path, span):
 
     for yaw in YAWS:
         n, longest, med = _hough_straightness(
-            equirect_to_perspective(frames[300], yaw, PITCH, FOV, OUT_W, OUT_H, span))
-        print(f"[straight-line] frame 300 yaw={yaw:+d}: {n} segments, "
+            equirect_to_perspective(mid, yaw, PITCH, FOV, OUT_W, OUT_H, span))
+        print(f"[straight-line] frame {mid_key} yaw={yaw:+d}: {n} segments, "
               f"longest {longest} px, median {med:.0f} px (proxy)")
 
     print(f"[saved] {len(saved)} images to {OUTDIR}/:")
     for fn in saved:
         print("   ", fn)
 
-    _inject_check(frames[300], span)
-    detector_check(frames[300], span)
+    _inject_check(mid, span)
+    detector_check(mid, span)
     return saved
 
 
@@ -309,7 +329,7 @@ def detector_check(equirect_frame, span):
     Phase 1 is players-only; ball detection on reprojected tiles is a later problem."""
     from ultralytics import YOLO
     view = equirect_to_perspective(equirect_frame, 0, PITCH, FOV, OUT_W, OUT_H, span)
-    cv2.imwrite(os.path.join(OUTDIR, "proj_300_0_detcheck.png"), view)
+    cv2.imwrite(os.path.join(OUTDIR, "detcheck_view.png"), view)
 
     path, imgsz, conf_thr = "yolo26l.pt", 1280, 0.10   # matches pipeline PLAYER conf
     if not os.path.exists(path):
@@ -348,13 +368,20 @@ def main():
     ap.add_argument("--span", type=float, default=None,
                     help="yaw span of source: 360 (full sphere, 2:1 image) or "
                          "180 (hemisphere). Default: 360.")
+    ap.add_argument("--times", type=float, nargs="+", default=None,
+                    help="frame timestamps in seconds (overrides frame indices "
+                         "100/300/500), e.g. --times 70 85 100")
+    ap.add_argument("--crop", type=int, nargs=4, default=None,
+                    metavar=("X", "Y", "W", "H"),
+                    help="crop every frame to an equirect content region (for "
+                         "VR180 footage letterboxed inside a 16:9 frame)")
     args = ap.parse_args()
 
     span = args.span if args.span is not None else 360.0
     if args.synthetic:
         run_synthetic(span)
     elif args.video:
-        run_real(args.video, span)
+        run_real(args.video, span, times=args.times, crop=args.crop)
     else:
         ap.error("pass --video PATH or --synthetic")
 
