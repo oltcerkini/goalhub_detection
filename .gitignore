@@ -22,3 +22,6 @@ runs/
 semi_supervised_data/
 soccana_dataset/
 youtube_matches_1080p/
+
+# VR180 outputs
+out/

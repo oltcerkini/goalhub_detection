@@ -2,6 +2,29 @@
 
 _Last updated: 2026-10-08. Maintainer note: read this first when resuming work._
 
+## 0. How to work on this project (operating instructions)
+
+- **Read this file first**, and **update it** after every phase / work session.
+- **Execute, don't just plan.** Work in small verifiable steps; run the relevant
+  test before moving to the next step. Ship working increments.
+- **Verify, never assert.** Any claim ("it works", "no degradation") needs a
+  number or a measurement behind it. If a result surprises you, check it
+  *before* reporting.
+- **Report outcomes, not engineering essays.** The user does not need the
+  internals. Say what works / what doesn't / what's next, briefly. Only go deep
+  when asked.
+- **Flat pipeline stays the default and untouched.** All VR180 work is additive.
+- **Never retrain a model, never delete the user's footage/datasets, without an
+  explicit ask.**
+- **Per-video "training" = calibration** (fit the camera pose for that video).
+  ML retraining is a *last resort*, only for the ball, and only on the user's PC.
+- **Keep the live task list in sync** with section 4 below (harness tasks).
+
+**Live task list (harness):** #9 runnable pipeline · #10 calibration one-command ·
+#11 metric projection + gate · #12 ROI · #13 goal validation (36.35 s) ·
+#14 ball temporal redesign · #15 app upload→calibrate→process ·
+#16 validate all 6 clips · #17 virtual camera + MP4.
+
 ## 1. Product goal (the user's words)
 
 > Upload a 180° video → trace the curved pitch lines and enter the pitch dimensions →
