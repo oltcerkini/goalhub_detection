@@ -196,6 +196,7 @@ def _launch_processing(task_id, video_path, cal_path, output_path,
         cmd.extend(["--model", model])
     if team_tracks:
         cmd.extend(["--team-tracks", team_tracks])
+    cmd.extend(["--track-init-frames", "90"])
 
     tasks[task_id]["status"] = "processing"
     tasks[task_id]["started_at"] = time.time()

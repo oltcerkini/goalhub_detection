@@ -177,10 +177,25 @@ class PlayerTracker:
 
         return stable_ids
 
+    @staticmethod
+    def _iou(bbox_a, bbox_b):
+        """Intersection-over-union between two [x1,y1,x2,y2] boxes."""
+        ax1, ay1, ax2, ay2 = bbox_a
+        bx1, by1, bx2, by2 = bbox_b
+        xi1 = max(ax1, bx1)
+        yi1 = max(ay1, by1)
+        xi2 = min(ax2, bx2)
+        yi2 = min(ay2, by2)
+        inter = max(0, xi2 - xi1) * max(0, yi2 - yi1)
+        area_a = max(0, ax2 - ax1) * max(0, ay2 - ay1)
+        area_b = max(0, bx2 - bx1) * max(0, by2 - by1)
+        union = area_a + area_b - inter
+        return inter / union if union > 0 else 0.0
+
     def _match_lost(self, bbox, appearance):
         """Find the best recently-lost track matching this detection.
 
-        Uses a combined score of appearance similarity + position proximity.
+        Uses IOU (primary during occlusion) + appearance similarity + position proximity.
         Returns stable track ID or None.
         """
         cx = (float(bbox[0]) + float(bbox[2])) / 2
@@ -203,20 +218,21 @@ class PlayerTracker:
             if dist > self.proximity_px * 2:
                 continue  # too far even with appearance
 
+            # IOU between new detection and track's last-known bbox
+            iou = self._iou(bbox, lb)
+
             # Normalised position score (0..1, higher = better)
             pos_score = max(0.0, 1.0 - dist / self.proximity_px)
 
             # Appearance score
             if appearance is not None:
-                # Compare against the track's stored appearance(s)
                 app_scores = []
                 if info["appearance"] is not None:
                     app_scores.append(
                         self._appearance_similarity(appearance, info["appearance"])
                     )
-                # Also compare against accumulated history
                 if sid in self._seen_appearances:
-                    for hist in self._seen_appearances[sid][-3:]:  # last 3
+                    for hist in self._seen_appearances[sid][-3:]:
                         app_scores.append(
                             self._appearance_similarity(appearance, hist)
                         )
@@ -224,14 +240,22 @@ class PlayerTracker:
             else:
                 app_score = 0.0
 
-            # Combined: weighted sum
+            # Dynamic weight: when IOU is high, trust geometry over appearance.
+            # During occlusion (IOU ~0 but very close), boost position weight.
             w = self.match_distance_weight
-            combined = w * pos_score + (1 - w) * app_score
+            if iou > 0.3:
+                w = 0.8  # strong overlap → mostly geometric
+                combined = w * iou + (1 - w) * app_score
+            elif dist < self.proximity_px * 0.25:
+                w = 0.7  # very close → prefer position
+                combined = w * pos_score + (1 - w) * app_score
+            else:
+                combined = w * pos_score + (1 - w) * app_score
 
             # Require minimum appearance match if appearance is available
             if appearance is not None and app_score < self.appearance_threshold:
-                if dist > self.proximity_px:
-                    continue  # need both proximity AND appearance
+                if dist > self.proximity_px and iou < 0.1:
+                    continue  # need both proximity AND appearance (unless high IOU)
 
             if combined > best_score and combined > 0.1:
                 best_score = combined

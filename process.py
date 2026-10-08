@@ -60,6 +60,9 @@ def main():
                     help="Directory for output video + JSON (default: app_data/output)")
     ap.add_argument("--team-tracks", type=str, default=None,
                     help="Comma-separated track IDs to keep. Run without filter first to see IDs.")
+    ap.add_argument("--track-init-frames", type=int, default=90,
+                    help="Drop tracks that first appear after this many processed frames. "
+                         "Catches late-arriving false positives (referees, linesmen). 0 = disable.")
     args = ap.parse_args()
 
     # Default model: prefer yolo26l.pt (large COCO, best person detection).
@@ -117,9 +120,9 @@ def main():
     # Modules — unified YOLO detector at high resolution for small-object detection
     detector = YOLODetector(model_path=args.model, conf=args.threshold, imgsz=args.imgsz)
     ball_detector = BallDetector(detector)
-    tracker = PlayerTracker(max_missed=60, proximity_px=200,
-                             appearance_threshold=0.45,
-                             match_distance_weight=0.4)
+    tracker = PlayerTracker(max_missed=90, proximity_px=250,
+                             appearance_threshold=0.4,
+                             match_distance_weight=0.5)
 
     # Gamma correction LUT
     if args.gamma != 1.0:
@@ -133,6 +136,7 @@ def main():
     ball_trail = []          # [(x, y, frame, conf), …]
     prev_positions = {}      # track_id -> (cx, cy)
     track_distances = {}     # track_id -> total meters
+    first_frame_for_track = {}  # track_id -> first frame seen
     frame_idx = 0
     processed = 0
     t_start = time.time()
@@ -212,6 +216,10 @@ def main():
                     cls_id = int(tracked.class_id[i]) if tracked.class_id is not None else PLAYER
                     cls_name = CLASS_NAMES.get(cls_id, "Player")
 
+                    # Record first frame this track was seen
+                    if tid not in first_frame_for_track:
+                        first_frame_for_track[tid] = frame_idx
+
                     # Sample jersey colour for team classification
                     team_classifier.sample(frame, tid, (x1, y1, x2, y2), frame_idx)
 
@@ -270,6 +278,32 @@ def main():
     if n_removed:
         print(f"  Trail validation: removed {n_removed} false-positive ball detections"
               f" ({n_before} → {len(ball_trail)})")
+
+    # ── LATE-TRACK FILTER ──────────────────────────────────────────────
+    # Drop tracks that first appeared after track_init_frames — these are
+    # almost always false positives (referees, linesmen, fans) that wander
+    # onto the pitch later and get misidentified as players.
+    if args.track_init_frames > 0 and first_frame_for_track:
+        late_tracks = {
+            tid for tid, first_fr in first_frame_for_track.items()
+            if first_fr > args.track_init_frames
+        }
+        if late_tracks:
+            before = len(all_players)
+            dropped_track_ids = set()
+            for key in list(all_players.keys()):
+                tid = all_players[key]["track_id"]
+                if tid in late_tracks:
+                    dropped_track_ids.add(tid)
+                    del all_players[key]
+            # Clean up team classifier samples for dropped tracks
+            for tid in dropped_track_ids:
+                for frame_data in team_classifier._frame_data.values():
+                    frame_data.pop(tid, None)
+            print(f"  Late-track filter: dropped {len(dropped_track_ids)} track(s)"
+                  f" that appeared after frame {args.track_init_frames}:"
+                  f" {sorted(dropped_track_ids)}"
+                  f" ({before} → {len(all_players)} detections)")
 
     # ── BALL TRAIL GAP-FILLING ─────────────────────────────────────────
     # Linearly interpolate across small gaps (≤5 frames) so the ball trail
