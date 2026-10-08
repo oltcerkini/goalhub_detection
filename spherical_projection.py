@@ -23,7 +23,13 @@ def equirect_to_perspective(equirect_img, yaw_deg, pitch_deg, fov_deg, out_w, ou
     Horizontal span: the full image width covers ``h_span_deg`` of yaw.
         360.0 = standard full-sphere equirectangular (default).
         180.0 = VR180-style hemisphere equirect (the spec's "180 deg video").
-    The vertical span is always 180 deg (equirectangular definition).
+
+    ASSUMPTION (unverified): the full image HEIGHT always covers 180 deg of
+    pitch, i.e. row 0 = +90 deg (zenith), row H = -90 deg (nadir), row H/2 = 0.
+    This is the equirectangular definition, but a real VR180 camera may crop a
+    different vertical FOV or sit off-level. It is NOT yet verified against a
+    known pitch polygon; the calibration phase (spherical ground model) will
+    test it. Until then every pitch value inherits this assumption.
 
     Output image: principal point at centre, focal length
         fx = fy = (out_w / 2) / tan(fov_deg / 2)

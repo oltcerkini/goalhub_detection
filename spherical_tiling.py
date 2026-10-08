@@ -177,43 +177,56 @@ def _iou(a, b):
     return inter / ua if ua > 0 else 0.0
 
 
-def merge_to_equirect(tile_dets, span, eq_w, eq_h, iou_thr=0.5):
+def _map_bbox_exact(bbox, yaw, pitch, fov, span, eq_w, eq_h):
+    """Project the four tile-local bbox corners and take their equirect AABB.
+    This replaces the earlier linear approximation (4.1) — no sec^2 error."""
+    x1, y1, x2, y2 = bbox
+    xs, ys = [], []
+    for (u, v) in ((x1, y1), (x2, y1), (x2, y2), (x1, y2)):
+        X, Y = tile_pixel_to_equirect(u, v, yaw, pitch, fov, span, eq_w, eq_h)
+        xs.append(X); ys.append(Y)
+    return [min(xs), min(ys), max(xs), max(ys)]
+
+
+def _map_bbox_linear(bbox, yaw, pitch, fov, span, eq_w, eq_h):
+    """Previous approximation: centre mapped exactly, size scaled by the local
+    linear (Jacobian) of the tile->equirect map. Kept only to measure its error."""
+    x1, y1, x2, y2 = bbox
+    uc, vc = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+    X, Y = tile_pixel_to_equirect(uc, vc, yaw, pitch, fov, span, eq_w, eq_h)
+    eps = 4.0
+    Xu, Yu = tile_pixel_to_equirect(uc + eps, vc, yaw, pitch, fov, span, eq_w, eq_h)
+    Xv, Yv = tile_pixel_to_equirect(uc, vc + eps, yaw, pitch, fov, span, eq_w, eq_h)
+    wt, ht = (x2 - x1), (y2 - y1)
+    w_eq = abs(Xu - X) / eps * wt + abs(Xv - X) / eps * ht
+    h_eq = abs(Yu - Y) / eps * wt + abs(Yv - Y) / eps * ht
+    return [X - w_eq / 2, Y - h_eq / 2, X + w_eq / 2, Y + h_eq / 2]
+
+
+def merge_to_equirect(tile_dets, span, eq_w, eq_h, iou_thr=0.5, bbox_key="bbox"):
     """Map tile detections to equirect pixels, then greedy NMS at IoU `iou_thr`
     (tie-break by confidence). NO merging in tile space.
 
-    tile_dets: list of dicts with keys
-        tile_id, yaw, pitch, fov, bbox=(x1,y1,x2,y2) tile-local, conf, cls.
-
-    Bbox size approximation: the tile-local box is scaled by the *local linear
-    (Jacobian)* of the tile->equirect map at the box centre, i.e. a first-order
-    linearisation around the detection. This is exact in the limit of a small
-    box; error grows with box size and with yaw distance from the tile centre
-    (gnomonic stretch ~ sec^2(yaw_offset)). For player-sized boxes at our tile
-    FOV the error is a few percent; it is worst for large boxes near a tile edge.
+    Each mapped detection carries three boxes:
+      bbox        exact (4 corner projection, 4.1)
+      bbox_linear previous linear/Jacobian approximation (for error reporting)
+      center      tile-centre mapped exactly
+    `bbox_key` selects which box NMS uses (default "bbox").
     """
     mapped = []
     for d in tile_dets:
         x1, y1, x2, y2 = d["bbox"]
         uc, vc = (x1 + x2) / 2.0, (y1 + y2) / 2.0
-        X, Y = tile_pixel_to_equirect(uc, vc, d["yaw"], d["pitch"], d["fov"],
-                                      span, eq_w, eq_h)
-        eps = 4.0
-        Xu, Yu = tile_pixel_to_equirect(uc + eps, vc, d["yaw"], d["pitch"], d["fov"], span, eq_w, eq_h)
-        Xv, Yv = tile_pixel_to_equirect(uc, vc + eps, d["yaw"], d["pitch"], d["fov"], span, eq_w, eq_h)
-        jxx, jxy = abs(Xu - X) / eps, abs(Xv - X) / eps
-        jyx, jyy = abs(Yu - Y) / eps, abs(Yv - Y) / eps
-        wt, ht = (x2 - x1), (y2 - y1)
-        w_eq = jxx * wt + jxy * ht
-        h_eq = jyx * wt + jyy * ht
-        cx, cy = X, Y
-        # yaw offset from the tile centre -> report the approximation magnitude
-        d_yaw = abs(((X / eq_w - 0.5) * span) - d["yaw"])
+        cx, cy = tile_pixel_to_equirect(uc, vc, d["yaw"], d["pitch"], d["fov"],
+                                        span, eq_w, eq_h)
+        exact = _map_bbox_exact(d["bbox"], d["yaw"], d["pitch"], d["fov"], span, eq_w, eq_h)
+        lin = _map_bbox_linear(d["bbox"], d["yaw"], d["pitch"], d["fov"], span, eq_w, eq_h)
         mapped.append({
             "tile_id": d["tile_id"], "yaw": d["yaw"], "pitch": d["pitch"],
             "conf": float(d["conf"]), "cls": d.get("cls", 0),
-            "bbox": [cx - w_eq / 2, cy - h_eq / 2, cx + w_eq / 2, cy + h_eq / 2],
-            "center": (cx, cy), "yaw_offset_from_tile": d_yaw,
-            "scale": (w_eq / max(wt, 1e-6)),
+            "bbox": exact, "bbox_linear": lin,
+            "center": (cx, cy),
+            "yaw_offset_from_tile": abs(((cx / eq_w - 0.5) * span) - d["yaw"]),
         })
 
     order = sorted(range(len(mapped)), key=lambda i: -mapped[i]["conf"])
@@ -221,7 +234,7 @@ def merge_to_equirect(tile_dets, span, eq_w, eq_h, iou_thr=0.5):
     while order:
         i = order.pop(0)
         keep.append(i)
-        order = [j for j in order if _iou(mapped[i]["bbox"], mapped[j]["bbox"]) < iou_thr]
+        order = [j for j in order if _iou(mapped[i][bbox_key], mapped[j][bbox_key]) < iou_thr]
     return [mapped[i] for i in keep], mapped
 
 
