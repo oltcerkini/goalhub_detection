@@ -25,6 +25,42 @@ _Last updated: 2026-10-08. Maintainer note: read this first when resuming work._
 #14 ball temporal redesign · #15 app upload→calibrate→process ·
 #16 validate all 6 clips · #17 virtual camera + MP4.
 
+## RESUME HERE  (saved 2026-10-08, end of session)
+
+**Do this first:** read this file top-to-bottom, then continue at **Task #10**.
+
+| # | task | state |
+|---|---|---|
+| 9 | VR180 runnable pipeline | ✅ **DONE** — `vr180_pipeline.py` |
+| 10 | calibration one-command (traces → calibration.json) | ⏭ **NEXT** |
+| 11 | metric projection + calibration gate | ◐ partly in `vr180_pipeline` (ground-contact + gate); finish |
+| 12 | ROI: drop off-pitch | ◐ grass ROI wired in pipeline; needs calibration-based ROI |
+| 13 | goal validation on 36.35 s clip | ⏸ needs #10 + a ball track |
+| 14 | ball temporal redesign (Track B) | ⏸ the main open risk |
+| 15 | app: upload → calibrate → process | ⏸ after #10 |
+| 16 | validate across all 6 clips | ⏸ |
+| 17 | virtual camera + MP4 | ⏸ |
+
+**Where we are:** the whole chain now runs end-to-end in one command —
+`python vr180_pipeline.py --video "assets/180Videos/<clip>.mkv" [--calibration calib/calibration.json]`
+→ normalize → FOV-60 player tiling → merge → ROI → ByteTrack → full-frame ball →
+tracking JSON (`mode: "equirect"`). Smoke test on the goal clip (35 s, 20 frames):
+15.6 players/frame, 17 unique ids, 20 ball candidates, 47 s. Metric fields are
+correctly withheld while `calibration_valid = false`.
+
+**Known state / open items:**
+- No calibration on disk yet → metric metres and goals are not active. That is
+  what Task #10 unblocks.
+- Ball is the weak link (low confidence); #14 is the redesign. Detectors are
+  **not** being retrained.
+- The vertical-span assumption is unresolved (see §5b) — 180 assumed, `fit_vspan`
+  is off by default because it is ill-conditioned.
+- One clip is SBS stereo (Viewpt) — handled by `equirect.py`.
+
+**Environment / assets:** Python venv with ultralytics (TensorRT engine loads),
+OpenCV, scipy, supervision. Six clips in `assets/180Videos/`. Models at repo root
+(`yolo26l.pt`, `ball_detector_yolo26m.engine`).
+
 ## 1. Product goal (the user's words)
 
 > Upload a 180° video → trace the curved pitch lines and enter the pitch dimensions →
