@@ -19,6 +19,11 @@
 <body>
 <div id="bar">
   <input type="file" id="file" accept="image/*">
+  <span class="grp">Pitch:
+    <select id="preset"></select>
+    <input type="number" id="plen" step="0.5" style="width:64px"> ×
+    <input type="number" id="pwid" step="0.5" style="width:64px"> m
+  </span>
   <select id="label"></select>
   <button id="newline">New line</button>
   <button id="undo">Undo point</button>
@@ -37,6 +42,23 @@ const COLORS = ["#ff5252","#40c4ff","#69f0ae","#ffd740","#e040fb","#ff6e40","#64
 const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
 const info = document.getElementById('info'), lblSel = document.getElementById('label');
 LABELS.forEach(l => lblSel.append(new Option(l, l)));
+
+// ---- pitch dimensions (the system asks the user for the real pitch size) --
+const PRESETS = {
+  "11v11 105×68": {length:105,width:68,penalty_depth:16.5,penalty_half:20.16,circle_r:9.15,goal_half_width:3.66,goal_height:2.44},
+  "9v9 80×50":    {length:80, width:50, penalty_depth:13, penalty_half:16.5, circle_r:8.0, goal_half_width:3.66, goal_height:2.13},
+  "7v7 60×40":    {length:60, width:40, penalty_depth:9,  penalty_half:13,   circle_r:6.0, goal_half_width:3.0,  goal_height:2.0},
+  "custom":       {length:105,width:68,penalty_depth:16.5,penalty_half:20.16,circle_r:9.15,goal_half_width:3.66,goal_height:2.44}
+};
+let pitch = Object.assign({}, PRESETS["11v11 105×68"]);
+const presetSel = document.getElementById('preset'), plen = document.getElementById('plen'),
+      pwid = document.getElementById('pwid');
+Object.keys(PRESETS).forEach(k => presetSel.append(new Option(k, k)));
+function syncPitchInputs(){ plen.value = pitch.length; pwid.value = pitch.width; }
+presetSel.onchange = ()=>{ pitch = Object.assign({}, PRESETS[presetSel.value]); syncPitchInputs(); };
+plen.oninput = ()=>{ pitch.length = +plen.value; presetSel.value = 'custom'; };
+pwid.oninput = ()=>{ pitch.width  = +pwid.value; presetSel.value = 'custom'; };
+syncPitchInputs();
 
 let img = new Image(), view = {s:1,tx:0,ty:0}, lines = [], panning = null;
 const cur = () => lines[lines.length-1];
@@ -91,6 +113,8 @@ document.getElementById('delline').onclick = ()=>{ lines.pop(); draw(); };
 document.getElementById('fit').onclick = fit;
 document.getElementById('save').onclick = ()=>{
   const data = { image: img.dataset.name || 'frame.jpg', size:[img.naturalWidth,img.naturalHeight],
+    span: 180, crop: null,
+    pitch: Object.assign({}, pitch, {length:+plen.value, width:+pwid.value}),
     lines: lines.filter(l=>l.pts.length>1).map(l=>({label:l.label, points:l.pts})) };
   const blob = new Blob([JSON.stringify(data,null,3)],{type:'application/json'});
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob);

@@ -23,32 +23,41 @@ polyline sampling, which otherwise quantises the fit).
 import numpy as np
 from scipy.optimize import least_squares
 
-# ---- standard dimensions (metres); defaults, overridable ------------------ #
-PITCH_LEN, PITCH_WID = 105.0, 68.0
-PENALTY_BOX_DEPTH = 16.5
-PENALTY_BOX_HALF = 20.16        # 40.32 m wide
-CENTRE_CIRCLE_R = 9.15
-GOAL_HALF_WIDTH, GOAL_HEIGHT = 3.66, 2.44
+# ---- standard dimensions (metres); defaults, overridable by the user ------ #
+DEFAULT_PITCH = {
+    "length": 105.0, "width": 68.0,
+    "penalty_depth": 16.5, "penalty_half": 20.16,   # 40.32 m wide box
+    "circle_r": 9.15, "goal_half_width": 3.66, "goal_height": 2.44,
+}
+# legacy aliases (other modules import these)
+PITCH_LEN, PITCH_WID = DEFAULT_PITCH["length"], DEFAULT_PITCH["width"]
+PENALTY_BOX_DEPTH, PENALTY_BOX_HALF = DEFAULT_PITCH["penalty_depth"], DEFAULT_PITCH["penalty_half"]
+CENTRE_CIRCLE_R = DEFAULT_PITCH["circle_r"]
+GOAL_HALF_WIDTH, GOAL_HEIGHT = DEFAULT_PITCH["goal_half_width"], DEFAULT_PITCH["goal_height"]
 
 
-# ---- known pitch geometry ------------------------------------------------- #
-def pitch_geometry(length=PITCH_LEN, width=PITCH_WID):
+def pitch_geometry(dims=None):
     """label -> spec in (x, z) metres.
+
+    dims: optional dict overriding DEFAULT_PITCH keys (the user supplies the
+    real pitch size, e.g. a youth 9v9 pitch).  Specs:
       ("line", a, b)        infinite line through a,b
       ("circle", c, r)      circle centre c radius r
       ("poly", [p0..pn])    closed outline (segments, clamped)
     """
-    hl, hw = length / 2, width / 2
-    d, hb = PENALTY_BOX_DEPTH, PENALTY_BOX_HALF
+    d = dict(DEFAULT_PITCH)
+    d.update(dims or {})
+    hl, hw = d["length"] / 2, d["width"] / 2
+    pd, ph = d["penalty_depth"], d["penalty_half"]
     return {
         "touchline_near": ("line", (-hl, hw), (hl, hw)),
         "touchline_far": ("line", (-hl, -hw), (hl, -hw)),
         "goal_line_left": ("line", (-hl, -hw), (-hl, hw)),
         "goal_line_right": ("line", (hl, -hw), (hl, hw)),
         "halfway": ("line", (0, -hw), (0, hw)),
-        "penalty_box_left": ("poly", [(-hl, -hb), (-hl + d, -hb), (-hl + d, hb), (-hl, hb)]),
-        "penalty_box_right": ("poly", [(hl, -hb), (hl - d, -hb), (hl - d, hb), (hl, hb)]),
-        "centre_circle": ("circle", (0.0, 0.0), CENTRE_CIRCLE_R),
+        "penalty_box_left": ("poly", [(-hl, -ph), (-hl + pd, -ph), (-hl + pd, ph), (-hl, ph)]),
+        "penalty_box_right": ("poly", [(hl, -ph), (hl - pd, -ph), (hl - pd, ph), (hl, ph)]),
+        "centre_circle": ("circle", (0.0, 0.0), d["circle_r"]),
     }
 
 
@@ -222,12 +231,73 @@ def solve_pose(traces, W, H, span=180.0, geom=None, seed_inits=None, max_nfev=40
     if best is None:
         raise RuntimeError("solver failed on all inits")
     cost, p = best
-    pose = {"P": p[:3].tolist(), "rvec": p[3:6].tolist(), "R": rotmat(p[3:6]).tolist()}
+    pose = {"P": p[:3], "rvec": p[3:6]}
+    res = resid(p)
     n = sum(len(v[0]) for v in groups.values())
-    return {"P": pose["P"], "rvec": pose["rvec"], "R": pose["R"], "cost": cost,
-            "rms_m": float(np.sqrt(cost / max(n, 1))),
-            "rms_px": _rms_px(traces, {"P": p[:3], "rvec": p[3:6]}, geom, W, H, span),
+    return {"P": list(p[:3]), "rvec": list(p[3:6]), "R": rotmat(p[3:6]).tolist(),
+            "cost": cost, "rms_m": float(np.sqrt(cost / max(n, 1))),
+            "med_m": float(np.median(res)),
+            "rms_px": _rms_px(traces, pose, geom, W, H, span),
             "n": int(n), "labels": sorted(groups)}
+
+
+# ---- calibration contract (from the pencil-tool trace file) --------------- #
+CALIB_VERSION = 1
+RMS_VALID_M = 1.0          # metric RMS below this -> calibration_valid
+
+
+def calibration_from_traces(src, span=None, verbose=True):
+    """src: path to calib_equirect.json, or the parsed dict.
+
+    Input:  {image, size:[W,H], span?, crop?, pitch?{...dimensions...},
+             lines:[{label, points:[[x,y],..]}]}
+    Output: a versioned calibration contract (see CALIB_VERSION).
+    """
+    import json
+    import os
+    data = json.load(open(src)) if isinstance(src, (str, os.PathLike)) else src
+    W, H = (data.get("size") or data.get("image_size"))
+    span = float(span if span is not None else data.get("span", 180.0))
+    dims = data.get("pitch") or {}
+    geom = pitch_geometry(dims)
+
+    traces = []
+    used = {}
+    for ln in data.get("lines", []):
+        lab = ln.get("label")
+        if lab not in geom:
+            continue
+        for pt in ln.get("points", []):
+            traces.append((float(pt[0]), float(pt[1]), lab))
+            used[lab] = used.get(lab, 0) + 1
+    if not traces:
+        raise RuntimeError("no usable traces (labels must match the known pitch features)")
+
+    sol = solve_pose(traces, W, H, span, geom=geom)
+    # validity on the MEDIAN residual: the RMS is dominated by near-horizon traces
+    # where a pixel maps to metres of ground, which says nothing about fit quality.
+    valid = bool(sol["med_m"] < RMS_VALID_M and sol["n"] >= 12)
+    out = {
+        "version": CALIB_VERSION,
+        "projection": "equirect",
+        "span_deg": span,
+        "image_size": [int(W), int(H)],
+        "content_region": data.get("crop"),
+        "source_image": data.get("image"),
+        "pitch": {**DEFAULT_PITCH, **dims},
+        "camera_pose": {"position_m": sol["P"], "rotation_vector": sol["rvec"],
+                        "R": sol["R"]},
+        "traced_features": {"labels": sorted(used), "points_per_label": used},
+        "quality": {"med_m": sol["med_m"], "rms_m": sol["rms_m"], "rms_px": sol["rms_px"],
+                    "n_points": sol["n"], "valid": valid,
+                    "valid_threshold_m": RMS_VALID_M},
+    }
+    if verbose:
+        print(f"calibration: {sol['n']} pts from {sorted(used)}")
+        print(f"  pose P={np.round(sol['P'], 2)}  median {sol['med_m']:.3f} m / "
+              f"rms {sol['rms_m']:.3f} m / {sol['rms_px']:.2f} px  -> "
+              f"calibration_valid={valid}")
+    return out
 
 
 # ---- Phase C public API --------------------------------------------------- #
