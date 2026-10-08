@@ -1,0 +1,22 @@
+Existing dataset: 36843 images
+Loading YOLO model: yolo26l.pt (imgsz=3840)
+  Detected base COCO model (80 classes)
+Detection model: yolo26l.pt at 3840px (COCO class 32 = sports ball)
+Videos to process: 41
+[1/41] 01 - FULL MATCH ｜ Croatia 1-1 Czechia ｜ VIP Tactical Camera ｜ EURO 2020 ｜.mp4: already has 2726 samples, skipping
+[2/41] 02 - PSG 5 0 Inter Milan Full Match Tactical CAM.mp4: already has 2718 samples, skipping
+[3/41] 03 - FULL MATCH ｜ Croatia 3-5 Spain ｜ VIP Tactical Camera ｜ EURO 2020 ｜.mp4: already has 2836 samples, skipping
+[4/41] 04 - Full Match Tactical Cam UCL UEFA Champions League  24⧸25  2nd Leg - Liverpool vs PSG (11 Mar 2025).mp4: already has 2700 samples, skipping
+[5/41] 05 - FULL MATCH ｜ Czechia 0-1 England ｜ VIP Tactical Camera ｜ EURO 2020 ｜.mp4: already has 2700 samples, skipping
+[6/41] 06 - FULL MATCH ｜ Belgium 1-2 Italy ｜ VIP Tactical Camera ｜ EURO 2020 ｜.mp4: already has 2700 samples, skipping
+[7/41] 07 - Liverpool 3-2 PSG ｜ VIP Tactical Camera ｜ 2018 ｜.mp4: already has 1640 samples, skipping
+[8/41] 08 - FULL MATCH ｜ Belgium 3-0 Russia ｜ VIP Tactical Camera ｜ EURO 2020 ｜.mp4: already has 2700 samples, skipping
+[9/41] 09 - FULL MATCH ｜ Brazil v Mexico ｜ World Cup 2018 ｜ Exclusive Tactical Camera HD 1080p ｜.mp4: already has 2700 samples, skipping
+[10/41] 10 - FULL MATCH ｜ Belgium 1-0 Portugal ｜ VIP Tactical Camera ｜ EURO 2020 ｜.mp4: already has 2700 samples, skipping
+[11/41] 11 - FULL MATCH ｜ Man City v Chelsea ｜ VIP Tactical Camera 1080p ｜ 2022 ｜.mp4: already has 2700 samples, skipping
+[12/41] 13 - FULL MATCH ｜ Manchester City vs Chelsea ｜ Final ｜ Exclusive VIP Tactical Camera HD 1080p ｜ 2021 ｜.mp4: already has 876 samples, skipping
+[13/41] 14 - Italy defensive organisation EURO2016 Tactical Cam.mp4: already has 22 samples, skipping
+[14/41] 15 - France Defensive Animation ｜ Tactical cam Analysis.mp4: already has 198 samples, skipping
+[15/41] 16 - FRANCIA - MARRUECOS WC2022 (CÁMARA TÁCTICA).mp4: already has 681 samples, skipping
+
+[16/41] 17 - INGLATERRA - FRANCIA WC2022 (CÁMARA TÁCTICA).mp4: 1280x720 @ 30.0fps, 100752 frames
