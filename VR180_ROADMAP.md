@@ -119,6 +119,35 @@ Existing flat pipeline (untouched, default): `process.py`, `detector.py`,
 3. Calibration depends on user tracing quality (≤2 px clicks for <1 % pose error).
 4. The pitch-size prompt matters: youth pitches (9v9/7v7) differ from 105×68.
 
+## 5b. Footage inventory (`assets/180Videos/`)
+
+Six clips received 2026-10-08. Normalization module `equirect.py` probes each
+(robust letterbox detection + stereo layout):
+
+| clip | raw | layout | content | aspect |
+|---|---|---|---|---|
+| Barca 04B Blue vs FC Dallas | 3840×2160 | mono | 3395×1592 | 2.13 |
+| Barca 04B vs Challenger United | 3840×2160 | mono | 3398×1359 | 2.50 |
+| Barca 11B Garnet vs Titans | 3840×2160 | mono | 3386×2074 | 1.63 |
+| D.D.WOLVES (night) | 3840×2160 | mono | 3622×796 | **4.55** |
+| PASC Fire (portrait) | 1920×2160 | mono | 1878×2082 | 0.90 |
+| Sports Football / Viewpt Nano | 3840×2160 | **SBS stereo** | 1797×2040 | 0.88 |
+
+**Open issue raised by the inventory — VERTICAL SPAN.** The projection assumes
+the content height spans 180° of pitch. Content aspects span 0.88 → 4.55, which
+cannot all be 180°×180° with plausibly square-ish pixels. Either the vertical
+span differs per clip, or the pixel aspect varies far more than expected. The
+Barca 04B Blue vs FC Dallas clip behaved correctly under the 180° assumption
+(round centre circle in Phase 1), so it is at least right for that one.
+
+**Proposed fix:** make the vertical span (or a pixel-aspect factor) a *solved
+parameter* in `calib/spherical_calib.solve_pose` — the traces then determine it,
+and a wrong assumption shows up as a poor fit (`calibration_valid = false`).
+Until then, treat metric output as clip-validated only.
+
+**Second finding:** one in six clips is **stereo** (SBS) — `equirect.py` now
+auto-detects and de-stacks (takes one eye).
+
 ## 6. Waiting on the user
 - A VR180 clip **with a clear goal** (validate goal detection on real footage).
 - A **second** VR180 clip (different pitch/camera) for calibration generalisation.
