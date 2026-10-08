@@ -177,6 +177,25 @@ def _iou(a, b):
     return inter / ua if ua > 0 else 0.0
 
 
+def _same_object(a, b, iou_thr, dist_frac, criterion, bbox_key="bbox"):
+    """Merge test between two mapped detections (equirect space).
+
+    criterion="center" (default, canonical): merge when the equirect centres are
+    within dist_frac * min(w_i, w_j, h_i, h_j). Chosen over bbox-IoU because the
+    SAME player gets different equirect box sizes in different tiles (yaw-stretch
+    ~2x observed), which drives IoU down and left a real pair unmerged at IoU 0.46
+    with centres only 5px apart. Centre distance is size-invariant.
+    criterion="iou": the previous behaviour, kept for comparison.
+    """
+    if criterion == "iou":
+        return _iou(a[bbox_key], b[bbox_key]) >= iou_thr
+    (ax, ay), (bx, by) = a["center"], b["center"]
+    dist = float(np.hypot(ax - bx, ay - by))
+    wa, ha = a["bbox"][2] - a["bbox"][0], a["bbox"][3] - a["bbox"][1]
+    wb, hb = b["bbox"][2] - b["bbox"][0], b["bbox"][3] - b["bbox"][1]
+    return dist <= dist_frac * min(wa, wb, ha, hb)
+
+
 def _map_bbox_exact(bbox, yaw, pitch, fov, span, eq_w, eq_h):
     """Project the four tile-local bbox corners and take their equirect AABB.
     This replaces the earlier linear approximation (4.1) — no sec^2 error."""
@@ -203,15 +222,19 @@ def _map_bbox_linear(bbox, yaw, pitch, fov, span, eq_w, eq_h):
     return [X - w_eq / 2, Y - h_eq / 2, X + w_eq / 2, Y + h_eq / 2]
 
 
-def merge_to_equirect(tile_dets, span, eq_w, eq_h, iou_thr=0.5, bbox_key="bbox"):
-    """Map tile detections to equirect pixels, then greedy NMS at IoU `iou_thr`
-    (tie-break by confidence). NO merging in tile space.
+def merge_to_equirect(tile_dets, span, eq_w, eq_h, iou_thr=0.5, bbox_key="bbox",
+                      criterion="center", dist_frac=0.5):
+    """Map tile detections to equirect pixels, then greedy merge (tie-break by
+    confidence). NO merging in tile space.
 
-    Each mapped detection carries three boxes:
-      bbox        exact (4 corner projection, 4.1)
-      bbox_linear previous linear/Jacobian approximation (for error reporting)
-      center      tile-centre mapped exactly
-    `bbox_key` selects which box NMS uses (default "bbox").
+    CANONICAL merge criterion (5.1): equirect centre distance <= dist_frac *
+    min(box_w_i, box_w_j, box_h_i, box_h_j)  [criterion="center", dist_frac=0.5].
+    Chosen over bbox-IoU because the same player gets different equirect box
+    sizes across tiles (yaw-stretch), which made IoU unreliable. criterion="iou"
+    is kept only for comparison.
+
+    Each mapped detection carries: bbox (exact, 4-corner), bbox_linear (old
+    approximation, for error reporting) and center (tile centre mapped exactly).
     """
     mapped = []
     for d in tile_dets:
@@ -234,7 +257,9 @@ def merge_to_equirect(tile_dets, span, eq_w, eq_h, iou_thr=0.5, bbox_key="bbox")
     while order:
         i = order.pop(0)
         keep.append(i)
-        order = [j for j in order if _iou(mapped[i][bbox_key], mapped[j][bbox_key]) < iou_thr]
+        order = [j for j in order
+                 if not _same_object(mapped[i], mapped[j], iou_thr,
+                                     dist_frac, criterion, bbox_key)]
     return [mapped[i] for i in keep], mapped
 
 
