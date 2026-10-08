@@ -137,26 +137,33 @@ def rot_angle(Ra, Rb):
 
 
 # ---- projections ---------------------------------------------------------- #
-def equirect_dir(x_eq, y_eq, W, H, span):
+def equirect_dir(x_eq, y_eq, W, H, span, vspan=180.0):
+    """equirect pixel -> unit direction in the equirect frame.
+
+    span  = yaw scope (deg) mapped across the image WIDTH  (180 for VR180).
+    vspan = pitch scope (deg) mapped across the image HEIGHT. NOT always 180:
+    the club's clips crop to very different content aspect ratios (0.88..4.55),
+    so the vertical span is fitted by the solver rather than assumed.
+    """
     x_eq, y_eq = np.asarray(x_eq, float), np.asarray(y_eq, float)
     yaw = np.radians((x_eq / W - 0.5) * span)
-    pit = np.radians((0.5 - y_eq / H) * 180.0)
+    pit = np.radians((0.5 - y_eq / H) * vspan)
     return np.stack([np.sin(yaw) * np.cos(pit), np.sin(pit), np.cos(yaw) * np.cos(pit)], -1)
 
 
-def equirect_to_pitch(x_eq, y_eq, pose, W, H, span):
+def equirect_to_pitch(x_eq, y_eq, pose, W, H, span, vspan=180.0):
     """equirect pixel -> metric ground (x_m, z_m). Rays above the horizon are
     pushed far away so the solver gets a large, smooth residual."""
     P = np.asarray(pose["P"], float)
     R = rotmat(pose["rvec"])
-    d = equirect_dir(x_eq, y_eq, W, H, span) @ R.T
+    d = equirect_dir(x_eq, y_eq, W, H, span, vspan) @ R.T
     dy = np.minimum(d[..., 1], -1e-3)
     t = -P[1] / dy
     g = P[None, :] + t[..., None] * d
     return g[..., 0], g[..., 2]
 
 
-def pitch_to_equirect(x_m, z_m, pose, W, H, span):
+def pitch_to_equirect(x_m, z_m, pose, W, H, span, vspan=180.0):
     """metric ground (x_m, z_m) -> equirect pixel."""
     P = np.asarray(pose["P"], float)
     R = rotmat(pose["rvec"])
@@ -167,7 +174,7 @@ def pitch_to_equirect(x_m, z_m, pose, W, H, span):
     d_e = d_p @ R
     yaw = np.degrees(np.arctan2(d_e[..., 0], d_e[..., 2]))
     pit = np.degrees(np.arcsin(np.clip(d_e[..., 1], -1, 1)))
-    return (yaw / span + 0.5) * W, (0.5 - pit / 180.0) * H
+    return (yaw / span + 0.5) * W, (0.5 - pit / vspan) * H
 
 
 # ---- solver --------------------------------------------------------------- #
@@ -179,31 +186,42 @@ def _group(traces):
             for k, v in g.items()}
 
 
-def _rms_px(traces, pose, geom, W, H, span):
+def _rms_px(traces, pose, geom, W, H, span, vspan=180.0):
     errs = []
     for x, y, lab in traces:
         if lab not in geom:
             continue
-        gx, gz = equirect_to_pitch(x, y, pose, W, H, span)
+        gx, gz = equirect_to_pitch(x, y, pose, W, H, span, vspan)
         gx, gz = float(np.ravel(gx)[0]), float(np.ravel(gz)[0])
         if not (np.isfinite(gx) and np.isfinite(gz)):
             continue
         q = nearest_on((gx, gz), geom[lab])
-        ex, ey = pitch_to_equirect(q[0], q[1], pose, W, H, span)
+        ex, ey = pitch_to_equirect(q[0], q[1], pose, W, H, span, vspan)
         errs.append(np.hypot(float(np.ravel(ex)[0]) - x, float(np.ravel(ey)[0]) - y))
     return float(np.sqrt(np.mean(np.square(errs)))) if errs else float("nan")
 
 
-def solve_pose(traces, W, H, span=180.0, geom=None, seed_inits=None, max_nfev=400):
-    """Fit (P, rvec) so traced equirect curves land on the known pitch lines."""
+def solve_pose(traces, W, H, span=180.0, geom=None, seed_inits=None, max_nfev=400,
+               fit_vspan=False, vspan0=180.0):
+    """Fit camera pose (and optionally the vertical span) so traced equirect
+    curves land on the known pitch lines.
+
+    fit_vspan=True adds the pitch scope across the image height as a 7th
+    parameter, so clips whose content aspect is not ~1:1 do not need the
+    caller to know their vertical FOV.
+    """
     geom = geom or pitch_geometry()
     groups = _group([(float(x), float(y), l) for x, y, l in traces if l in geom])
+    n_par = 7 if fit_vspan else 6
+
+    def unpack(p):
+        return {"P": p[:3], "rvec": p[3:6]}, (p[6] if fit_vspan else vspan0)
 
     def resid(params):
-        pose = {"P": params[:3], "rvec": params[3:6]}
+        pose, vs = unpack(params)
         out = []
         for lab, (xs, ys) in groups.items():
-            gx, gz = equirect_to_pitch(xs, ys, pose, W, H, span)
+            gx, gz = equirect_to_pitch(xs, ys, pose, W, H, span, vs)
             g = np.stack([gx, gz], -1)
             out.append(np.clip(label_residual(g, geom[lab]), 0, 80.0))
         return np.concatenate(out) if out else np.zeros(1)
@@ -218,8 +236,17 @@ def solve_pose(traces, W, H, span=180.0, geom=None, seed_inits=None, max_nfev=40
 
     lo = np.array([-200, 0.5, -200, -np.pi, -np.pi, -np.pi])
     hi = np.array([200, 120, 200, np.pi, np.pi, np.pi])
+    for x0 in ([[40, 8, 0, 0, 0, 0, 180.0], [60, 5, -40, 0, 0, 0, 120.0],
+                [-40, 12, 40, 0, 0, 0, 90.0], [0, 10, 0, 0, 0, 0, 60.0]] if fit_vspan else []):
+        seed_inits.append(x0)
+    if fit_vspan:
+        lo = np.append(lo, 20.0); hi = np.append(hi, 180.0)
+
     best = None
     for x0 in seed_inits:
+        x0 = list(x0)
+        if fit_vspan and len(x0) == 6:
+            x0 = x0 + [vspan0]
         try:
             r = least_squares(resid, np.clip(x0, lo, hi), bounds=(lo, hi), method="trf",
                               max_nfev=max_nfev, xtol=1e-12, ftol=1e-12)
@@ -231,13 +258,13 @@ def solve_pose(traces, W, H, span=180.0, geom=None, seed_inits=None, max_nfev=40
     if best is None:
         raise RuntimeError("solver failed on all inits")
     cost, p = best
-    pose = {"P": p[:3], "rvec": p[3:6]}
+    pose, vspan = unpack(p)
     res = resid(p)
     n = sum(len(v[0]) for v in groups.values())
     return {"P": list(p[:3]), "rvec": list(p[3:6]), "R": rotmat(p[3:6]).tolist(),
-            "cost": cost, "rms_m": float(np.sqrt(cost / max(n, 1))),
-            "med_m": float(np.median(res)),
-            "rms_px": _rms_px(traces, pose, geom, W, H, span),
+            "vspan": float(vspan), "cost": cost,
+            "rms_m": float(np.sqrt(cost / max(n, 1))), "med_m": float(np.median(res)),
+            "rms_px": _rms_px(traces, pose, geom, W, H, span, vspan),
             "n": int(n), "labels": sorted(groups)}
 
 
@@ -273,7 +300,12 @@ def calibration_from_traces(src, span=None, verbose=True):
     if not traces:
         raise RuntimeError("no usable traces (labels must match the known pitch features)")
 
-    sol = solve_pose(traces, W, H, span, geom=geom)
+    # vspan is only fitted when explicitly requested. Freeing it is ill-conditioned
+    # (span <-> camera pose trade off), so a bad fit could pass validation while
+    # corrupting metres. Default: assume 180 and let a wrong assumption fail loudly.
+    fit_vs = bool(data.get("fit_vspan", False))
+    sol = solve_pose(traces, W, H, span, geom=geom, fit_vspan=fit_vs,
+                     vspan0=float(data.get("vspan_deg", 180.0)))
     # validity on the MEDIAN residual: the RMS is dominated by near-horizon traces
     # where a pixel maps to metres of ground, which says nothing about fit quality.
     valid = bool(sol["med_m"] < RMS_VALID_M and sol["n"] >= 12)
@@ -281,6 +313,7 @@ def calibration_from_traces(src, span=None, verbose=True):
         "version": CALIB_VERSION,
         "projection": "equirect",
         "span_deg": span,
+        "vspan_deg": sol["vspan"],
         "image_size": [int(W), int(H)],
         "content_region": data.get("crop"),
         "source_image": data.get("image"),
@@ -294,9 +327,9 @@ def calibration_from_traces(src, span=None, verbose=True):
     }
     if verbose:
         print(f"calibration: {sol['n']} pts from {sorted(used)}")
-        print(f"  pose P={np.round(sol['P'], 2)}  median {sol['med_m']:.3f} m / "
-              f"rms {sol['rms_m']:.3f} m / {sol['rms_px']:.2f} px  -> "
-              f"calibration_valid={valid}")
+        print(f"  pose P={np.round(sol['P'], 2)}  vspan={sol['vspan']:.1f} deg  "
+              f"median {sol['med_m']:.3f} m / rms {sol['rms_m']:.3f} m / "
+              f"{sol['rms_px']:.2f} px  -> calibration_valid={valid}")
     return out
 
 
@@ -312,7 +345,7 @@ def make_mappers(pose, W, H, span=180.0):
 
 # ---- Phase B synthetic self-test ------------------------------------------ #
 def synthetic_test(W=3401, H=1586, span=180.0, n_per_line=40, verbose=True,
-                   noise_px=0.0, seed=0):
+                   noise_px=0.0, seed=0, vspan_true=180.0, fit_vspan=True):
     import time
     rng = np.random.default_rng(seed)
     P_true = np.array([26.0, 9.5, -58.0])
@@ -325,46 +358,51 @@ def synthetic_test(W=3401, H=1586, span=180.0, n_per_line=40, verbose=True,
         idx = rng.choice(len(pts), size=min(n_per_line, len(pts)), replace=False)
         xs, ys = pitch_to_equirect(pts[idx, 0], pts[idx, 1],
                                    {"P": P_true, "rvec": rvec_from_matrix(R_true)},
-                                   W, H, span)
+                                   W, H, span, vspan_true)
         for x, y in zip(np.ravel(xs), np.ravel(ys)):
             if np.isfinite(x) and 0 <= x < W and 0 <= y < H:
                 if noise_px:
                     x, y = x + rng.normal(0, noise_px), y + rng.normal(0, noise_px)
                 traces.append((float(x), float(y), lab))
     if verbose:
-        print(f"synthetic: {len(traces)} points from {len(set(t[2] for t in traces))} lines")
+        print(f"synthetic: {len(traces)} points, true vspan {vspan_true:.0f} deg")
 
     t0 = time.time()
-    sol = solve_pose(traces, W, H, span, geom=geom)
+    sol = solve_pose(traces, W, H, span, geom=geom, fit_vspan=fit_vspan,
+                     vspan0=180.0 if vspan_true == 180 else vspan_true)
     dt = time.time() - t0
     P_rec = np.array(sol["P"]); R_rec = rotmat(sol["rvec"])
     pos_err = float(np.linalg.norm(P_rec - P_true))
     ang_err = rot_angle(R_rec, R_true)
+    vs_err = abs(sol["vspan"] - vspan_true)
     ok = pos_err < 0.01 * PITCH_LEN and ang_err < 0.5
+    if fit_vspan:
+        ok = ok and vs_err < 5.0
     med_px = _median_px(traces, {"P": np.array(sol["P"]), "rvec": np.array(sol["rvec"])},
-                        geom, W, H, span)
+                        geom, W, H, span, sol["vspan"])
     if verbose:
         print(f"  true P {np.round(P_true,2)}  rec P {np.round(P_rec,2)}")
-        print(f"  position error {pos_err:.3f} m ({pos_err/PITCH_LEN*100:.3f}% of length)"
-              f"   orientation error {ang_err:.3f} deg")
-        print(f"  reprojection: RMS {sol['rms_px']:.2f} px, median {med_px:.2f} px "
-              f"(RMS inflated by near-horizon traces)   runtime {dt:.2f} s   "
-              f"{'PASS' if ok else 'FAIL'}")
-    return {"pos_err_m": pos_err, "ang_err_deg": ang_err, "rms_px": sol["rms_px"],
-            "median_px": med_px, "runtime_s": dt, "pass": ok}
+        print(f"  pos err {pos_err:.3f} m ({pos_err/PITCH_LEN*100:.3f}%)  "
+              f"orient err {ang_err:.3f} deg  vspan {sol['vspan']:.1f} "
+              f"(err {vs_err:.1f} deg)")
+        print(f"  reprojection RMS {sol['rms_px']:.2f} px, median {med_px:.2f} px   "
+              f"runtime {dt:.2f} s   {'PASS' if ok else 'FAIL'}")
+    return {"pos_err_m": pos_err, "ang_err_deg": ang_err, "vspan": sol["vspan"],
+            "vspan_err_deg": vs_err, "rms_px": sol["rms_px"], "median_px": med_px,
+            "runtime_s": dt, "pass": ok}
 
 
-def _median_px(traces, pose, geom, W, H, span):
+def _median_px(traces, pose, geom, W, H, span, vspan=180.0):
     errs = []
     for x, y, lab in traces:
         if lab not in geom:
             continue
-        gx, gz = equirect_to_pitch(x, y, pose, W, H, span)
+        gx, gz = equirect_to_pitch(x, y, pose, W, H, span, vspan)
         gx, gz = float(np.ravel(gx)[0]), float(np.ravel(gz)[0])
         if not (np.isfinite(gx) and np.isfinite(gz)):
             continue
         q = nearest_on((gx, gz), geom[lab])
-        ex, ey = pitch_to_equirect(q[0], q[1], pose, W, H, span)
+        ex, ey = pitch_to_equirect(q[0], q[1], pose, W, H, span, vspan)
         errs.append(np.hypot(float(np.ravel(ex)[0]) - x, float(np.ravel(ey)[0]) - y))
     return float(np.median(errs)) if errs else float("nan")
 
@@ -435,5 +473,9 @@ if __name__ == "__main__":
     for sig in (1.0, 2.0, 5.0):
         print(f"-- sigma {sig} px --")
         synthetic_test(noise_px=sig)
+    print("\n== vertical-span fitting (non-180 content), 2px noise ==")
+    for vs in (180.0, 120.0, 90.0, 60.0):
+        print(f"-- true vspan {vs:.0f} deg --")
+        synthetic_test(vspan_true=vs, noise_px=2.0, fit_vspan=True)
     print("\n== Phase C metric round-trip ==")
     metric_test(noise_px=2.0)

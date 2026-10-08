@@ -140,10 +140,18 @@ span differs per clip, or the pixel aspect varies far more than expected. The
 Barca 04B Blue vs FC Dallas clip behaved correctly under the 180° assumption
 (round centre circle in Phase 1), so it is at least right for that one.
 
-**Proposed fix:** make the vertical span (or a pixel-aspect factor) a *solved
-parameter* in `calib/spherical_calib.solve_pose` — the traces then determine it,
-and a wrong assumption shows up as a poor fit (`calibration_valid = false`).
-Until then, treat metric output as clip-validated only.
+**Resolution attempt (commit pending):** added `vspan` as an optional solved
+parameter (`solve_pose(fit_vspan=True)`). **Result: it is ill-conditioned** —
+with 2 px trace noise it drifts (true 120° → fitted 137.8°; true 90° → 97.7°)
+because vspan and camera pose trade off. It *lowers* the residual while being
+wrong, so it can pass `calibration_valid` and still corrupt metres. **Therefore
+it is OFF by default**: assume vspan = 180 (validated on the Barca clip) and let
+a wrong assumption fail loudly (bad fit → `calibration_valid = false`) rather
+than overfit silently.
+Remaining options: (a) accept 180 and validate per clip via the fit; (b) get the
+camera's real vertical FOV from the user/manufacturer; (c) constrain vspan with
+a prior (square-pixel assumption: vspan = span * H / W — currently contradicts
+the Barca round-circle observation, so unresolved).
 
 **Second finding:** one in six clips is **stereo** (SBS) — `equirect.py` now
 auto-detects and de-stacks (takes one eye).
