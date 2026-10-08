@@ -149,8 +149,13 @@ Until then, treat metric output as clip-validated only.
 auto-detects and de-stacks (takes one eye).
 
 ## 6. Waiting on the user
-- A VR180 clip **with a clear goal** (validate goal detection on real footage).
-- A **second** VR180 clip (different pitch/camera) for calibration generalisation.
+- ~~A VR180 clip with a clear goal~~ — **resolved**: user confirmed a goal at
+  **36.35 s** in `Barca Academy Austin 04B Blue vs FC DallasAlamo 4K 180VR`
+  (`llQXdpryFjI`): "player shoots the ball and scoring". Verified the frame shows
+  the left goal, penalty box and the ball. **This is the real-video validation
+  case for goal detection** (needs calibration + ball track to exercise).
+- A **second** VR180 clip (different pitch/camera) for calibration generalisation
+  — already have 5 more clips in `assets/180Videos/`.
 - Optional: a flat/drone clip of a similar pitch for a real flat-vs-VR180 A/B.
 
 ## 7. Decision log
