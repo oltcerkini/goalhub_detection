@@ -1,0 +1,109 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<title>Equirect pitch calibration</title>
+<style>
+  :root{--bg:#14181d;--fg:#e8eaed;--mut:#9aa0a6;--acc:#4c8bf5}
+  *{box-sizing:border-box} html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);
+    font:13px/1.4 system-ui,Segoe UI,Roboto,sans-serif}
+  #bar{position:fixed;inset:0 0 auto 0;height:46px;display:flex;gap:8px;align-items:center;
+    padding:0 10px;background:#1b2027;border-bottom:1px solid #2a313a;z-index:5;flex-wrap:wrap}
+  button,select,input[type=file]{background:#232a33;color:var(--fg);border:1px solid #333c47;
+    border-radius:6px;padding:6px 10px;font:inherit;cursor:pointer}
+  button:hover{background:#2b333d} button.on{background:var(--acc);border-color:var(--acc)}
+  #wrap{position:absolute;inset:46px 0 0 0;overflow:hidden}
+  canvas{display:block;position:absolute;left:0;top:0}
+  #hint{position:absolute;left:10px;bottom:10px;background:#0009;padding:6px 10px;border-radius:6px;
+    color:var(--mut);font-size:12px;pointer-events:none}
+  #info{margin-left:auto;color:var(--mut)}
+</style></head>
+<body>
+<div id="bar">
+  <input type="file" id="file" accept="image/*">
+  <select id="label"></select>
+  <button id="newline">New line</button>
+  <button id="undo">Undo point</button>
+  <button id="delline">Delete line</button>
+  <button id="save">Save JSON</button>
+  <button id="fit">Fit</button>
+  <span id="info"></span>
+</div>
+<div id="wrap"><canvas id="cv"></canvas>
+  <div id="hint">click = add point &middot; wheel = zoom &middot; shift-drag = pan &middot; pick a label, trace a pitch line, New line for the next</div>
+</div>
+<script>
+const LABELS = ["touchline_near","touchline_far","goal_line_left","goal_line_right","halfway",
+  "penalty_box_left","penalty_box_right","centre_circle","goal_left","goal_right"];
+const COLORS = ["#ff5252","#40c4ff","#69f0ae","#ffd740","#e040fb","#ff6e40","#64ffda","#b2ff59","#ff4081","#18ffff"];
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const info = document.getElementById('info'), lblSel = document.getElementById('label');
+LABELS.forEach(l => lblSel.append(new Option(l, l)));
+
+let img = new Image(), view = {s:1,tx:0,ty:0}, lines = [], panning = null;
+const cur = () => lines[lines.length-1];
+
+function fit(){
+  const w = cv.parentElement.clientWidth, h = cv.parentElement.clientHeight;
+  const s = Math.min(w/img.naturalWidth, h/img.naturalHeight) * 0.98;
+  view = {s, tx:(w - img.naturalWidth*s)/2, ty:(h - img.naturalHeight*s)/2};
+  resize(); draw();
+}
+function resize(){
+  const w = cv.parentElement.clientWidth, h = cv.parentElement.clientHeight;
+  cv.width = w; cv.height = h; ctx.imageSmoothingEnabled = view.s < 1;
+}
+function toImg(px,py){ return [(px-view.tx)/view.s, (py-view.ty)/view.s]; }
+
+function draw(){
+  ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,cv.width,cv.height);
+  ctx.setTransform(view.s,0,0,view.s,view.tx,view.ty);
+  if(img.complete && img.naturalWidth) ctx.drawImage(img,0,0);
+  ctx.lineWidth = 3/view.s; ctx.font = (16/view.s)+'px sans-serif';
+  lines.forEach((ln,i)=>{
+    const c = COLORS[LABELS.indexOf(ln.label)%COLORS.length];
+    ctx.strokeStyle = c; ctx.fillStyle = c;
+    if(ln.pts.length>1){ ctx.beginPath(); ln.pts.forEach(([x,y],j)=> j?ctx.lineTo(x,y):ctx.moveTo(x,y));
+      if(ln.closed) ctx.closePath(); ctx.stroke(); }
+    ln.pts.forEach(([x,y])=>{ ctx.beginPath(); ctx.arc(x,y,4/view.s,0,7); ctx.fill(); });
+    if(ln.pts.length){ ctx.fillText(ln.label, ln.pts[0][0]+6/view.s, ln.pts[0][1]-6/view.s); }
+  });
+  ctx.setTransform(1,0,0,1,0,0);
+  const pts = lines.reduce((a,l)=>a+l.pts.length,0);
+  info.textContent = `${img.naturalWidth||0}×${img.naturalHeight||0} · ${lines.length} line(s) · ${pts} pts`;
+}
+
+cv.addEventListener('mousedown', e=>{ if(e.shiftKey){ panning=[e.clientX,e.clientY,view.tx,view.ty]; } });
+cv.addEventListener('mousemove', e=>{ if(panning){ view.tx = panning[2]+(e.clientX-panning[0]);
+  view.ty = panning[3]+(e.clientY-panning[1]); draw(); } });
+window.addEventListener('mouseup', ()=> panning=null);
+cv.addEventListener('click', e=>{
+  if(panning) return;
+  const [x,y] = toImg(e.offsetX, e.offsetY);
+  if(!cur()) lines.push({label: lblSel.value, pts: []});
+  cur().pts.push([+x.toFixed(1), +y.toFixed(1)]); draw();
+});
+cv.addEventListener('wheel', e=>{ e.preventDefault();
+  const f = e.deltaY<0 ? 1.15 : 1/1.15, [ix,iy]=toImg(e.offsetX,e.offsetY);
+  view.s *= f; view.tx = e.offsetX - ix*view.s; view.ty = e.offsetY - iy*view.s; draw(); }, {passive:false});
+
+document.getElementById('newline').onclick = ()=>{ lines.push({label: lblSel.value, pts: []}); draw(); };
+document.getElementById('undo').onclick = ()=>{ if(cur()){ cur().pts.pop(); if(!cur().pts.length) lines.pop(); draw(); } };
+document.getElementById('delline').onclick = ()=>{ lines.pop(); draw(); };
+document.getElementById('fit').onclick = fit;
+document.getElementById('save').onclick = ()=>{
+  const data = { image: img.dataset.name || 'frame.jpg', size:[img.naturalWidth,img.naturalHeight],
+    lines: lines.filter(l=>l.pts.length>1).map(l=>({label:l.label, points:l.pts})) };
+  const blob = new Blob([JSON.stringify(data,null,3)],{type:'application/json'});
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+  a.download = 'calib_equirect.json'; a.click();
+};
+document.getElementById('file').onchange = e=>{
+  const f = e.target.files[0]; if(!f) return;
+  img = new Image(); img.dataset.name = f.name;
+  img.onload = fit; img.src = URL.createObjectURL(f);
+};
+// default image shipped next to this file
+img = new Image(); img.dataset.name = 'frame_85s.jpg';
+img.onload = fit; img.onerror = ()=>{ info.textContent = 'load an equirect frame with the file picker'; };
+img.src = 'frame_85s.jpg';
+window.addEventListener('resize', ()=>{ resize(); draw(); });
+</script></body></html>
