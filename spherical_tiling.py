@@ -13,6 +13,9 @@ CONVENTION (matches spherical_projection.equirect_to_perspective):
   Vertical scope is always 180 deg (equirect definition).
 """
 
+import json
+import os
+
 import numpy as np
 import cv2
 
@@ -68,41 +71,69 @@ def detect_span(w, h, override=None):
 # --------------------------------------------------------------------------- #
 # 2.2 / 2.3 — tile grid + tiling
 # --------------------------------------------------------------------------- #
-TILE_FOV_H = 60.0                 # horizontal FOV per tile (deg)
+TILE_FOV_H = 60.0                 # default horizontal FOV per tile (deg)
 TILE_W, TILE_H = 1920, 1080       # 16:9 output -> ~36 deg vertical FOV
-YAW_CENTRES_180 = (-85.0, -45.0, 0.0, 45.0, 85.0)
-PITCH_CENTRES_180 = (-15.0, -45.0)
+
+# Grid presets for span=180, keyed by tile horizontal FOV (deg).
+GRID_180 = {
+    60.0: {"yaw": (-85.0, -45.0, 0.0, 45.0, 85.0),          # 5 cols x 2 rows = 10
+           "pitch": (-15.0, -45.0)},
+    40.0: {"yaw": (-70.0, -50.0, -30.0, -10.0, 10.0, 30.0, 50.0, 70.0),  # 8 x 3 = 24
+           "pitch": (-10.0, -30.0, -50.0)},
+}
+YAW_CENTRES_180 = GRID_180[60.0]["yaw"]
+PITCH_CENTRES_180 = GRID_180[60.0]["pitch"]
 
 
-def build_grid(span):
+def build_grid(span, fov_h=TILE_FOV_H):
     """Return [(tile_id, yaw_deg, pitch_deg, fov_h_deg), ...].
 
-    Span 180 (VR180): 5 yaw columns x 2 pitch rows = 10 tiles.
-      - yaw cols centred at -85/-45/0/+45/+85 with 60 deg FOV -> each covers
-        60 deg, adjacent overlap ~15-25%; union covers the full -90..+90.
-      - pitch rows at -15 and -45 with ~36 deg vertical FOV -> each covers
-        +-18 deg; union covers about +3 .. -63 deg (the pitch band of an
-        elevated VR180 camera).
-    Span 360: same grid is a starting point but only covers +-85 of 360; a 360
-    run should widen YAW_CENTRES_180 (kept generic, not the Phase 2 target).
+    Span 180 (VR180), fov 60: 5 yaw x 2 pitch = 10 tiles. Yaw cols 60 deg each
+    cover -90..+90; pitch rows (+-18 deg) cover about +3..-63.
+    Span 180, fov 40: 8 yaw x 3 pitch = 24 tiles (1.5x magnification).
+    Span 360: a starting point only (needs more columns); not a target here.
     """
-    rows = PITCH_CENTRES_180
-    tiles = []
-    tid = 0
-    for p in rows:
-        for y in YAW_CENTRES_180:
-            tiles.append((tid, float(y), float(p), TILE_FOV_H))
+    preset = GRID_180.get(float(fov_h))
+    if preset is None:
+        raise ValueError(f"no grid preset for fov_h={fov_h} (have {list(GRID_180)})")
+    tiles, tid = [], 0
+    for p in preset["pitch"]:
+        for y in preset["yaw"]:
+            tiles.append((tid, float(y), float(p), float(fov_h)))
             tid += 1
     return tiles
 
 
-def tile_equirect(equirect_img, grid, span):
+def hemisphere_mask(yaw_deg, pitch_deg, fov_deg, span, out_w=TILE_W, out_h=TILE_H):
+    """Boolean mask of tile pixels whose ray yaw lies within +-span/2.
+
+    For span=180 an edge tile (e.g. yaw +85, 60 deg FOV) reaches past +90; those
+    pixels would otherwise be edge-replicated by cv2.remap. Masking them (3c)
+    removes the replicated region before detection.
+    """
+    fx = (out_w / 2.0) / np.tan(np.radians(fov_deg) / 2.0)
+    uu, vv = np.meshgrid(np.arange(out_w), np.arange(out_h))
+    x = (uu - out_w / 2.0) / fx
+    y = (vv - out_h / 2.0) / fx
+    fwd, right, up = _tile_basis(yaw_deg, pitch_deg)
+    dx = fwd[0] + x * right[0] - y * up[0]
+    dz = fwd[2] + x * right[2] - y * up[2]
+    ray_yaw = np.degrees(np.arctan2(dx, dz))
+    return np.abs(ray_yaw) <= (span / 2.0 + 1e-6)
+
+
+def tile_equirect(equirect_img, grid, span, mask_edges=True):
     """Produce tile views: list of (tile_img, yaw, pitch, fov, tile_id).
-    No detection here — pure projection (2.3)."""
+    No detection here — pure projection (2.3). For span<360 with mask_edges,
+    the out-of-hemisphere (edge-replicated) region is blacked out (3c)."""
     out = []
     for (tid, yaw, pitch, fov) in grid:
         img = equirect_to_perspective(equirect_img, yaw, pitch, fov,
                                       TILE_W, TILE_H, span)
+        if mask_edges and span < 360:
+            m = hemisphere_mask(yaw, pitch, fov, span)
+            if not m.all():
+                img = np.where(m[:, :, None], img, 0)
         out.append((img, yaw, pitch, fov, tid))
     return out
 
@@ -192,3 +223,70 @@ def merge_to_equirect(tile_dets, span, eq_w, eq_h, iou_thr=0.5):
         keep.append(i)
         order = [j for j in order if _iou(mapped[i]["bbox"], mapped[j]["bbox"]) < iou_thr]
     return [mapped[i] for i in keep], mapped
+
+
+# --------------------------------------------------------------------------- #
+# 3a — pitch ROI masking
+# --------------------------------------------------------------------------- #
+def grass_roi_polygon(frame, hue=(35, 85), min_area_frac=0.02):
+    """Auto-derive a pitch ROI polygon (equirect pixels) from the grass colour.
+
+    Returns an (N,2) int32 polygon (hull of the largest grass region) or None.
+    Used as the fallback when a sidecar has no "roi". Detections whose equirect
+    centre falls outside are dropped (3a).
+    """
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    green = ((hsv[:, :, 0] >= hue[0]) & (hsv[:, :, 0] <= hue[1])
+             & (hsv[:, :, 1] >= 60) & (hsv[:, :, 2] >= 40)).astype(np.uint8) * 255
+    green = cv2.morphologyEx(green, cv2.MORPH_CLOSE, np.ones((31, 31), np.uint8))
+    green = cv2.morphologyEx(green, cv2.MORPH_OPEN, np.ones((17, 17), np.uint8))
+    cnts, _ = cv2.findContours(green, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return None
+    c = max(cnts, key=cv2.contourArea)
+    if cv2.contourArea(c) < min_area_frac * frame.shape[0] * frame.shape[1]:
+        return None
+    return cv2.convexHull(c).reshape(-1, 2).astype(np.int32)
+
+
+def roi_filter(dets, polygon, margin=0):
+    """Split mapped detections into (kept, dropped) by the pitch polygon."""
+    if polygon is None:
+        return list(dets), []
+    poly = np.asarray(polygon, dtype=np.int32)
+    kept, dropped = [], []
+    for d in dets:
+        cx, cy = d["center"]
+        inside = cv2.pointPolygonTest(poly, (float(cx), float(cy)), False) >= -margin
+        (kept if inside else dropped).append(d)
+    return kept, dropped
+
+
+# --------------------------------------------------------------------------- #
+# 3b — per-video sidecar config
+# --------------------------------------------------------------------------- #
+def sidecar_path(video_path):
+    return os.path.splitext(video_path)[0] + ".equirect.json"
+
+
+def load_sidecar(video_path):
+    """Load <video>.equirect.json if present, else None.
+
+    Format (all optional; missing keys fall back to auto-detection):
+        {
+          "span": 180,                    # 180 (VR180) or 360
+          "crop": [x, y, w, h],           # content region of the letterboxed frame
+          "roi": [[x, y], [x, y], ...]    # pitch polygon in equirect pixels
+        }
+    """
+    p = sidecar_path(video_path)
+    if os.path.isfile(p):
+        with open(p) as f:
+            return json.load(f)
+    return None
+
+
+def save_sidecar(video_path, cfg):
+    with open(sidecar_path(video_path), "w") as f:
+        json.dump(cfg, f, indent=2)
+    return sidecar_path(video_path)
