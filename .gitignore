@@ -5,6 +5,8 @@ __pycache__/
 *.mp4
 *.avi
 *.mov
+*.webm
+*.mkv
 *_processed.*
 *_annotated.*
 *_goalhub.json

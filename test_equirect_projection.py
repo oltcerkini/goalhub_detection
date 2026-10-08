@@ -1,9 +1,10 @@
 """Phase test: prove equirect -> perspective projection before any pipeline work.
 
 Real run (once the equirect video is on disk):
-    python test_equirect_projection.py --video path/to/equirect.mp4 [--span 180]
+    python test_equirect_projection.py --video path/to/equirect.webm [--span 360]
         -> extracts frames 100/300/500, writes 9 views to equirect_test/,
-           then runs the player + ball detectors on frame 300 @ yaw 0.
+           then runs the player detector on frame 300 @ yaw 0 (players only;
+           ball on projected tiles is out of scope for Phase 1).
 
 Math self-check (no video needed):
     python test_equirect_projection.py --synthetic [--span 360]
@@ -47,11 +48,77 @@ def extract_frames(video_path, frames):
     return out, total
 
 
+def _hough_straightness(view):
+    """Best-effort straight-line proxy on a real projected view: the longest
+    straight edge a Canny+Hough pass can find. A correct projection keeps long
+    world lines as long straight segments; a curved mapping shatters them into
+    short fragments, so the max segment length is a useful (if crude) signal."""
+    gray = cv2.cvtColor(view, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 60, 160)
+    lines = cv2.HoughLinesP(edges, 1, np.pi / 360, threshold=120,
+                            minLineLength=150, maxLineGap=8)
+    if lines is None:
+        return 0, 0, 0.0
+    seg = lines[:, 0, :]
+    lengths = np.hypot(seg[:, 2] - seg[:, 0], seg[:, 3] - seg[:, 1])
+    return len(lengths), int(lengths.max()), float(np.median(lengths))
+
+
+def _inject_check(equirect, span):
+    """Rigorous, content-independent real-frame geometry check.
+
+    Paint two great circles onto the real equirect:
+      - row H/2  -> the pitch=0 horizon (a great circle),
+      - col W/2  -> the yaw=0 meridian (a great circle).
+    A correct projection maps each to a *straight* line: the horizon to a
+    horizontal line through the principal point (row out_h/2), the meridian to
+    a vertical line through it (col out_w/2). Curvature or an off-centre result
+    means the convention is wrong — regardless of what the footage shows."""
+    H, W = equirect.shape[:2]
+    marc = equirect.copy()
+    cv2.line(marc, (0, H // 2), (W - 1, H // 2), (0, 0, 255), 10)   # horizon circle (red)
+    cv2.line(marc, (W // 2, 0), (W // 2, H - 1), (0, 255, 0), 10)   # yaw-0 meridian (green)
+
+    # Isolate the injected lines by differencing against a clean projection, so
+    # real scene colours (red crowd, green pitch) can't contaminate the masks.
+    for yaw in YAWS:
+        clean = equirect_to_perspective(equirect, yaw, 0, FOV, OUT_W, OUT_H, span)
+        mark = equirect_to_perspective(marc, yaw, 0, FOV, OUT_W, OUT_H, span)
+        if yaw == 0:
+            cv2.imwrite(os.path.join(OUTDIR, "inject_300_0.png"), mark)
+        d = mark.astype(int) - clean.astype(int)          # per-channel difference
+        dB, dG, dR = d[:, :, 0], d[:, :, 1], d[:, :, 2]
+        # Red line (0,0,255): R jumps up, G and B drop to ~0. Green line is the mirror.
+        red_mask = (dR > 90) & (dG < -40) & (dB < -40)
+        grn_mask = (dG > 90) & (dR < -40) & (dB < -40)
+        ys, xs = np.where(red_mask)
+        gys, gxs = np.where(grn_mask)
+        # Straightness = deviation of the line's *centreline* (per-column mean row
+        # for the horizon, per-row mean col for the meridian), so the line's
+        # thickness doesn't masquerade as curvature.
+        if len(ys):
+            cnt = np.bincount(xs, minlength=OUT_W)
+            cen = np.bincount(xs, weights=ys, minlength=OUT_W)[cnt > 0] / cnt[cnt > 0]
+            dev = np.abs(cen - np.median(cen))
+            print(f"[inject] yaw={yaw:+d}: horizon -> row {np.median(cen):.1f} "
+                  f"(expect {OUT_H/2:.0f}), centreline dev p99 {np.percentile(dev,99):.1f} px")
+        if len(gys):
+            cnt = np.bincount(gys, minlength=OUT_H)
+            cen = np.bincount(gys, weights=gxs, minlength=OUT_H)[cnt > 0] / cnt[cnt > 0]
+            dev = np.abs(cen - np.median(cen))
+            print(f"[inject] yaw={yaw:+d}: meridian -> col {np.median(cen):.1f} "
+                  f"(expect {OUT_W/2:.0f}), centreline dev p99 {np.percentile(dev,99):.1f} px")
+
+
 def run_real(video_path, span):
     os.makedirs(OUTDIR, exist_ok=True)
     frames, total = extract_frames(video_path, FRAMES)
     raw_h, raw_w = next(iter(frames.values())).shape[:2]
-    print(f"[resolution] raw equirect: {raw_w}x{raw_h}  (frames total={total})")
+    aspect = raw_w / raw_h
+    guess = "360° full-sphere" if 1.8 <= aspect <= 2.2 else \
+            "180° hemisphere" if 0.9 <= aspect <= 1.1 else "unclear"
+    print(f"[resolution] raw equirect: {raw_w}x{raw_h}  "
+          f"(aspect {aspect:.2f}:1 -> {guess}; frames total={total}; using span={span:.0f})")
 
     saved = []
     for f, img in frames.items():
@@ -61,10 +128,18 @@ def run_real(video_path, span):
             cv2.imwrite(fn, out)
             saved.append(fn)
     print(f"[resolution] projected views: {OUT_W}x{OUT_H} each")
+
+    for yaw in YAWS:
+        n, longest, med = _hough_straightness(
+            equirect_to_perspective(frames[300], yaw, PITCH, FOV, OUT_W, OUT_H, span))
+        print(f"[straight-line] frame 300 yaw={yaw:+d}: {n} segments, "
+              f"longest {longest} px, median {med:.0f} px (proxy)")
+
     print(f"[saved] {len(saved)} images to {OUTDIR}/:")
     for fn in saved:
         print("   ", fn)
 
+    _inject_check(frames[300], span)
     detector_check(frames[300], span)
     return saved
 
@@ -230,35 +305,40 @@ def run_synthetic(span):
 # Detector pass on one projected view (report only, no boxes, no training)
 # --------------------------------------------------------------------------- #
 def detector_check(equirect_frame, span):
+    """Player detector on one projected view. Report only — no boxes, no training.
+    Phase 1 is players-only; ball detection on reprojected tiles is a later problem."""
     from ultralytics import YOLO
     view = equirect_to_perspective(equirect_frame, 0, PITCH, FOV, OUT_W, OUT_H, span)
     cv2.imwrite(os.path.join(OUTDIR, "proj_300_0_detcheck.png"), view)
 
-    models = [("player yolo26l.pt", "yolo26l.pt", 1280),
-              ("ball yolo26m.engine", "ball_detector_yolo26m.engine", 640)]
-    for name, path, imgsz in models:
-        if not os.path.exists(path):
-            print(f"[detector] {name}: file not found, skipped")
-            continue
-        try:
-            res = YOLO(path).predict(view, imgsz=imgsz, conf=0.05, verbose=False)[0]
-        except Exception as e:                       # noqa: BLE001
-            print(f"[detector] {name}: failed ({e})")
-            continue
-        if res.boxes is None or len(res.boxes) == 0:
-            print(f"[detector] {name} @ imgsz={imgsz}: 0 detections")
-            continue
-        conf = res.boxes.conf.cpu().numpy()
-        cls = res.boxes.cls.cpu().numpy().astype(int)
-        names = res.names
-        per = {}
-        for c, s in zip(cls, conf):
-            per.setdefault(names.get(c, str(c)), []).append(float(s))
-        print(f"[detector] {name} @ imgsz={imgsz}: {len(conf)} detections, "
-              f"conf {conf.min():.3f}-{conf.max():.3f}")
-        for cname, scores in sorted(per.items()):
-            print(f"      {cname}: n={len(scores)} "
-                  f"conf {min(scores):.3f}-{max(scores):.3f}")
+    path, imgsz, conf_thr = "yolo26l.pt", 1280, 0.10   # matches pipeline PLAYER conf
+    if not os.path.exists(path):
+        print(f"[detector] {path}: not found, skipped")
+        return
+    try:
+        res = YOLO(path).predict(view, imgsz=imgsz, conf=conf_thr, verbose=False)[0]
+    except Exception as e:                               # noqa: BLE001
+        print(f"[detector] {path}: failed ({e})")
+        return
+    if res.boxes is None or len(res.boxes) == 0:
+        print(f"[detector] {path} @ imgsz={imgsz}, conf>={conf_thr}: 0 detections")
+        return
+
+    conf = res.boxes.conf.cpu().numpy()
+    cls = res.boxes.cls.cpu().numpy().astype(int)
+    names = res.names
+    person = cls == 0                                    # COCO class 0 = person
+    print(f"[detector] {path} @ imgsz={imgsz}, conf>={conf_thr}: "
+          f"{int(person.sum())} person / {len(conf)} total detections, "
+          f"person conf {conf[person].min():.3f}-{conf[person].max():.3f}"
+          if person.any() else
+          f"[detector] {path} @ imgsz={imgsz}, conf>={conf_thr}: "
+          f"0 person / {len(conf)} total detections")
+    per = {}
+    for c, s in zip(cls, conf):
+        per.setdefault(names.get(c, str(c)), []).append(float(s))
+    for cname, scores in sorted(per.items(), key=lambda kv: -len(kv[1])):
+        print(f"      {cname}: n={len(scores)} conf {min(scores):.3f}-{max(scores):.3f}")
 
 
 def main():
@@ -266,11 +346,11 @@ def main():
     ap.add_argument("--video", help="equirect video path (real test)")
     ap.add_argument("--synthetic", action="store_true", help="run math self-check")
     ap.add_argument("--span", type=float, default=None,
-                    help="yaw span of source: 360 (full) or 180 (VR180). "
-                         "Default: 180 given the spec's '180 deg video'.")
+                    help="yaw span of source: 360 (full sphere, 2:1 image) or "
+                         "180 (hemisphere). Default: 360.")
     args = ap.parse_args()
 
-    span = args.span if args.span is not None else 180.0
+    span = args.span if args.span is not None else 360.0
     if args.synthetic:
         run_synthetic(span)
     elif args.video:
