@@ -4,130 +4,133 @@
 <style>
   :root{--bg:#14181d;--fg:#e8eaed;--mut:#9aa0a6;--acc:#4c8bf5}
   *{box-sizing:border-box} html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);
-    font:13px/1.4 system-ui,Segoe UI,Roboto,sans-serif}
-  #bar{position:fixed;inset:0 0 auto 0;height:46px;display:flex;gap:8px;align-items:center;
-    padding:0 10px;background:#1b2027;border-bottom:1px solid #2a313a;z-index:5;flex-wrap:wrap}
-  button,select,input[type=file]{background:#232a33;color:var(--fg);border:1px solid #333c47;
-    border-radius:6px;padding:6px 10px;font:inherit;cursor:pointer}
+    font:13px/1.4 system-ui,Segoe UI,Roboto,sans-serif;overflow:hidden}
+  #bar{position:fixed;inset:0 0 auto 0;min-height:46px;display:flex;gap:8px;align-items:center;
+    padding:6px 10px;background:#1b2027;border-bottom:1px solid #2a313a;z-index:5;flex-wrap:wrap}
+  button,select,input[type=file],input[type=number]{background:#232a33;color:var(--fg);
+    border:1px solid #333c47;border-radius:6px;padding:6px 9px;font:inherit;cursor:pointer}
   button:hover{background:#2b333d} button.on{background:var(--acc);border-color:var(--acc)}
-  #wrap{position:absolute;inset:46px 0 0 0;overflow:hidden}
+  #wrap{position:absolute;inset:46px 0 0 0;overflow:hidden;touch-action:none}
   canvas{display:block;position:absolute;left:0;top:0}
   #hint{position:absolute;left:10px;bottom:10px;background:#0009;padding:6px 10px;border-radius:6px;
     color:var(--mut);font-size:12px;pointer-events:none}
-  #info{margin-left:auto;color:var(--mut)}
+  #info{margin-left:auto;color:var(--mut);font-variant-numeric:tabular-nums}
+  .grp{display:flex;gap:6px;align-items:center;color:var(--mut)}
 </style></head>
 <body>
 <div id="bar">
   <input type="file" id="file" accept="image/*">
-  <span class="grp">Pitch:
+  <span class="grp"><b>Pitch:</b>
     <select id="preset"></select>
-    <input type="number" id="plen" step="0.5" style="width:64px"> ×
-    <input type="number" id="pwid" step="0.5" style="width:64px"> m
+    <input type="number" id="plen" step="0.5" style="width:66px"> ×
+    <input type="number" id="pwid" step="0.5" style="width:66px"> m
   </span>
   <select id="label"></select>
-  <button id="newline">New line</button>
-  <button id="undo">Undo point</button>
-  <button id="delline">Delete line</button>
+  <button id="undo">Undo stroke</button>
+  <button id="clearlab">Clear this label</button>
+  <button id="clearall">Clear all</button>
   <button id="save">Save JSON</button>
   <button id="fit">Fit</button>
   <span id="info"></span>
 </div>
 <div id="wrap"><canvas id="cv"></canvas>
-  <div id="hint">click = add point &middot; wheel = zoom &middot; shift-drag = pan &middot; pick a label, trace a pitch line, New line for the next</div>
+  <div id="hint">drag to DRAW a curve along the line &middot; wheel = zoom &middot; shift-drag = pan &middot; pick a label first</div>
 </div>
 <script>
 const LABELS = ["touchline_near","touchline_far","goal_line_left","goal_line_right","halfway",
   "penalty_box_left","penalty_box_right","centre_circle","goal_left","goal_right"];
 const COLORS = ["#ff5252","#40c4ff","#69f0ae","#ffd740","#e040fb","#ff6e40","#64ffda","#b2ff59","#ff4081","#18ffff"];
-const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
-const info = document.getElementById('info'), lblSel = document.getElementById('label');
-LABELS.forEach(l => lblSel.append(new Option(l, l)));
+const cv=document.getElementById('cv'), ctx=cv.getContext('2d');
+const info=document.getElementById('info'), lblSel=document.getElementById('label');
+LABELS.forEach(l=>lblSel.append(new Option(l,l)));
 
-// ---- pitch dimensions (the system asks the user for the real pitch size) --
-const PRESETS = {
-  "11v11 105×68": {length:105,width:68,penalty_depth:16.5,penalty_half:20.16,circle_r:9.15,goal_half_width:3.66,goal_height:2.44},
-  "9v9 80×50":    {length:80, width:50, penalty_depth:13, penalty_half:16.5, circle_r:8.0, goal_half_width:3.66, goal_height:2.13},
-  "7v7 60×40":    {length:60, width:40, penalty_depth:9,  penalty_half:13,   circle_r:6.0, goal_half_width:3.0,  goal_height:2.0},
-  "custom":       {length:105,width:68,penalty_depth:16.5,penalty_half:20.16,circle_r:9.15,goal_half_width:3.66,goal_height:2.44}
-};
-let pitch = Object.assign({}, PRESETS["11v11 105×68"]);
-const presetSel = document.getElementById('preset'), plen = document.getElementById('plen'),
-      pwid = document.getElementById('pwid');
-Object.keys(PRESETS).forEach(k => presetSel.append(new Option(k, k)));
-function syncPitchInputs(){ plen.value = pitch.length; pwid.value = pitch.width; }
-presetSel.onchange = ()=>{ pitch = Object.assign({}, PRESETS[presetSel.value]); syncPitchInputs(); };
-plen.oninput = ()=>{ pitch.length = +plen.value; presetSel.value = 'custom'; };
-pwid.oninput = ()=>{ pitch.width  = +pwid.value; presetSel.value = 'custom'; };
-syncPitchInputs();
+// ---- pitch dimensions (the system asks for the real pitch size) ----
+const PRESETS={
+  "11v11 105×68":{length:105,width:68,penalty_depth:16.5,penalty_half:20.16,circle_r:9.15,goal_half_width:3.66,goal_height:2.44},
+  "9v9 80×50":{length:80,width:50,penalty_depth:13,penalty_half:16.5,circle_r:8.0,goal_half_width:3.66,goal_height:2.13},
+  "7v7 60×40":{length:60,width:40,penalty_depth:9,penalty_half:13,circle_r:6.0,goal_half_width:3.0,goal_height:2.0},
+  "custom":{length:105,width:68,penalty_depth:16.5,penalty_half:20.16,circle_r:9.15,goal_half_width:3.66,goal_height:2.44}};
+let pitch=Object.assign({},PRESETS["11v11 105×68"]);
+const presetSel=document.getElementById('preset'), plen=document.getElementById('plen'), pwid=document.getElementById('pwid');
+Object.keys(PRESETS).forEach(k=>presetSel.append(new Option(k,k)));
+const syncP=()=>{plen.value=pitch.length; pwid.value=pitch.width;};
+presetSel.onchange=()=>{pitch=Object.assign({},PRESETS[presetSel.value]); syncP();};
+plen.oninput=()=>{pitch.length=+plen.value; presetSel.value='custom';};
+pwid.oninput=()=>{pitch.width=+pwid.value; presetSel.value='custom';};
+syncP();
 
-let img = new Image(), view = {s:1,tx:0,ty:0}, lines = [], panning = null;
-const cur = () => lines[lines.length-1];
+// ---- state ----
+let img=new Image(), view={s:1,tx:0,ty:0}, lines=[], drawing=false, panning=null, cur=null;
+const toImg=(px,py)=>[(px-view.tx)/view.s,(py-view.ty)/view.s];
 
-function fit(){
-  const w = cv.parentElement.clientWidth, h = cv.parentElement.clientHeight;
-  const s = Math.min(w/img.naturalWidth, h/img.naturalHeight) * 0.98;
-  view = {s, tx:(w - img.naturalWidth*s)/2, ty:(h - img.naturalHeight*s)/2};
-  resize(); draw();
-}
-function resize(){
-  const w = cv.parentElement.clientWidth, h = cv.parentElement.clientHeight;
-  cv.width = w; cv.height = h; ctx.imageSmoothingEnabled = view.s < 1;
-}
-function toImg(px,py){ return [(px-view.tx)/view.s, (py-view.ty)/view.s]; }
+function resize(){const w=cv.parentElement.clientWidth,h=cv.parentElement.clientHeight;
+  cv.width=w;cv.height=h;ctx.imageSmoothingEnabled=view.s<1;}
+function fit(){const w=cv.parentElement.clientWidth,h=cv.parentElement.clientHeight;
+  const s=Math.min(w/img.naturalWidth,h/img.naturalHeight)*0.98;
+  view={s,tx:(w-img.naturalWidth*s)/2,ty:(h-img.naturalHeight*s)/2};resize();draw();}
+
+function smooth(pts){ if(pts.length<5) return pts;
+  const out=pts.map((_,i)=>{ const a=pts[Math.max(0,i-1)],b=pts[i],c=pts[Math.min(pts.length-1,i+1)];
+    return [(a[0]+2*b[0]+c[0])/4,(a[1]+2*b[1]+c[1])/4]; });
+  out[0]=pts[0]; out[out.length-1]=pts[pts.length-1]; return out; }
 
 function draw(){
   ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,cv.width,cv.height);
   ctx.setTransform(view.s,0,0,view.s,view.tx,view.ty);
-  if(img.complete && img.naturalWidth) ctx.drawImage(img,0,0);
-  ctx.lineWidth = 3/view.s; ctx.font = (16/view.s)+'px sans-serif';
-  lines.forEach((ln,i)=>{
-    const c = COLORS[LABELS.indexOf(ln.label)%COLORS.length];
-    ctx.strokeStyle = c; ctx.fillStyle = c;
-    if(ln.pts.length>1){ ctx.beginPath(); ln.pts.forEach(([x,y],j)=> j?ctx.lineTo(x,y):ctx.moveTo(x,y));
-      if(ln.closed) ctx.closePath(); ctx.stroke(); }
-    ln.pts.forEach(([x,y])=>{ ctx.beginPath(); ctx.arc(x,y,4/view.s,0,7); ctx.fill(); });
-    if(ln.pts.length){ ctx.fillText(ln.label, ln.pts[0][0]+6/view.s, ln.pts[0][1]-6/view.s); }
-  });
+  if(img.complete&&img.naturalWidth) ctx.drawImage(img,0,0);
+  ctx.lineWidth=3/view.s; ctx.lineJoin='round'; ctx.lineCap='round';
+  const stroke=(pts,col,close)=>{ if(pts.length<2)return; ctx.strokeStyle=col; ctx.beginPath();
+    pts.forEach(([x,y],j)=>j?ctx.lineTo(x,y):ctx.moveTo(x,y)); if(close)ctx.closePath(); ctx.stroke(); };
+  lines.forEach(ln=>{ const c=COLORS[Math.max(0,LABELS.indexOf(ln.label))%COLORS.length];
+    stroke(ln.pts,c,ln.closed); });
+  if(cur) stroke(cur.pts,'#ffffff',false);
   ctx.setTransform(1,0,0,1,0,0);
-  const pts = lines.reduce((a,l)=>a+l.pts.length,0);
-  info.textContent = `${img.naturalWidth||0}×${img.naturalHeight||0} · ${lines.length} line(s) · ${pts} pts`;
+  const pts=lines.reduce((a,l)=>a+l.pts.length,0);
+  info.textContent=`${img.naturalWidth||0}×${img.naturalHeight||0} · ${lines.length} stroke(s) · ${pts} pts · zoom ${view.s.toFixed(2)}×`;
 }
 
-cv.addEventListener('mousedown', e=>{ if(e.shiftKey){ panning=[e.clientX,e.clientY,view.tx,view.ty]; } });
-cv.addEventListener('mousemove', e=>{ if(panning){ view.tx = panning[2]+(e.clientX-panning[0]);
-  view.ty = panning[3]+(e.clientY-panning[1]); draw(); } });
-window.addEventListener('mouseup', ()=> panning=null);
-cv.addEventListener('click', e=>{
-  if(panning) return;
-  const [x,y] = toImg(e.offsetX, e.offsetY);
-  if(!cur()) lines.push({label: lblSel.value, pts: []});
-  cur().pts.push([+x.toFixed(1), +y.toFixed(1)]); draw();
+cv.addEventListener('pointerdown',e=>{
+  if(e.shiftKey||e.button===1){ panning=[e.clientX,e.clientY,view.tx,view.ty]; return; }
+  cv.setPointerCapture(e.pointerId);
+  const [x,y]=toImg(e.offsetX,e.offsetY);
+  cur={label:lblSel.value,pts:[[x,y]]}; drawing=true; draw();
 });
-cv.addEventListener('wheel', e=>{ e.preventDefault();
-  const f = e.deltaY<0 ? 1.15 : 1/1.15, [ix,iy]=toImg(e.offsetX,e.offsetY);
-  view.s *= f; view.tx = e.offsetX - ix*view.s; view.ty = e.offsetY - iy*view.s; draw(); }, {passive:false});
+cv.addEventListener('pointermove',e=>{
+  if(panning){ view.tx=panning[2]+(e.clientX-panning[0]); view.ty=panning[3]+(e.clientY-panning[1]); draw(); return; }
+  if(!drawing||!cur) return;
+  const [x,y]=toImg(e.offsetX,e.offsetY), last=cur.pts[cur.pts.length-1];
+  if(Math.hypot(x-last[0],y-last[1])*view.s < 3) return;      // decimate: >=3 screen px
+  cur.pts.push([x,y]); draw();
+});
+const endStroke=()=>{ if(!drawing) return; drawing=false;
+  if(cur&&cur.pts.length>=3){ cur.pts=smooth(cur.pts).map(p=>[+p[0].toFixed(1),+p[1].toFixed(1)]); lines.push(cur); }
+  cur=null; draw(); };
+cv.addEventListener('pointerup',endStroke);
+cv.addEventListener('pointercancel',endStroke);
+cv.addEventListener('pointerleave',()=>{ if(drawing) endStroke(); });
+cv.addEventListener('wheel',e=>{ e.preventDefault();
+  const f=e.deltaY<0?1.15:1/1.15,[ix,iy]=toImg(e.offsetX,e.offsetY);
+  view.s*=f; view.tx=e.offsetX-ix*view.s; view.ty=e.offsetY-iy*view.s; draw(); },{passive:false});
+window.addEventListener('mouseup',()=>panning=null);
 
-document.getElementById('newline').onclick = ()=>{ lines.push({label: lblSel.value, pts: []}); draw(); };
-document.getElementById('undo').onclick = ()=>{ if(cur()){ cur().pts.pop(); if(!cur().pts.length) lines.pop(); draw(); } };
-document.getElementById('delline').onclick = ()=>{ lines.pop(); draw(); };
-document.getElementById('fit').onclick = fit;
-document.getElementById('save').onclick = ()=>{
-  const data = { image: img.dataset.name || 'frame.jpg', size:[img.naturalWidth,img.naturalHeight],
-    span: 180, crop: null,
-    pitch: Object.assign({}, pitch, {length:+plen.value, width:+pwid.value}),
-    lines: lines.filter(l=>l.pts.length>1).map(l=>({label:l.label, points:l.pts})) };
-  const blob = new Blob([JSON.stringify(data,null,3)],{type:'application/json'});
-  const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
-  a.download = 'calib_equirect.json'; a.click();
+document.getElementById('undo').onclick=()=>{lines.pop();draw();};
+document.getElementById('clearlab').onclick=()=>{const L=lblSel.value;lines=lines.filter(l=>l.label!==L);draw();};
+document.getElementById('clearall').onclick=()=>{if(confirm('Clear all strokes?')){lines=[];draw();}};
+document.getElementById('fit').onclick=fit;
+document.getElementById('save').onclick=()=>{
+  // merge multiple strokes with the same label into one polyline
+  const byLabel={}; lines.forEach(l=>{ (byLabel[l.label]=byLabel[l.label]||[]).push(...l.pts); });
+  const data={ image:img.dataset.name||'frame.jpg', size:[img.naturalWidth,img.naturalHeight],
+    span:180, crop:null, pitch:Object.assign({},pitch,{length:+plen.value,width:+pwid.value}),
+    lines:Object.entries(byLabel).map(([label,points])=>({label,points})) };
+  const blob=new Blob([JSON.stringify(data,null,1)],{type:'application/json'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='calib_equirect.json'; a.click();
 };
-document.getElementById('file').onchange = e=>{
-  const f = e.target.files[0]; if(!f) return;
-  img = new Image(); img.dataset.name = f.name;
-  img.onload = fit; img.src = URL.createObjectURL(f);
-};
-// default image shipped next to this file
-img = new Image(); img.dataset.name = 'frame_85s.jpg';
-img.onload = fit; img.onerror = ()=>{ info.textContent = 'load an equirect frame with the file picker'; };
-img.src = 'frame_85s.jpg';
-window.addEventListener('resize', ()=>{ resize(); draw(); });
+document.getElementById('file').onchange=e=>{const f=e.target.files[0]; if(!f)return;
+  const n=new Image(); n.dataset.name=f.name; n.onload=fit; n.src=URL.createObjectURL(f);
+  img=n; lines=[]; };
+img.dataset.name='frame_85s.jpg'; img.onload=fit;
+img.onerror=()=>{info.textContent='load an equirect frame with the file picker';};
+img.src='frame_85s.jpg';
+window.addEventListener('resize',()=>{resize();draw();});
 </script></body></html>
