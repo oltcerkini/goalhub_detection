@@ -254,6 +254,11 @@ auto-detects and de-stacks (takes one eye).
   `vspan_deg`. Mismatching it scales every metre silently.
 - **ROI = calibration-derived pitch rectangle** (ground projection; players by
   bbox ground contact, ball by centre), grass hull kept only as the fallback.
+- **Calibration trace robustness (2026-10-09):** points outside the image frame
+  are dropped; a whole labelled line whose median residual is far worse than the
+  rest is auto-dropped and reported in `quality.dropped_labels`. Near-horizon
+  lines are the usual culprit — ~1 px ≈ metres there, so a small mis-trace
+  explodes. The far touchline sits near the horizon in the Barca clip.
 - **Calibration input = 4 corners per shape + bendable edges** (pen tool), NOT
   freehand tracing. Only the pitch outline is required; the halfway line is an
   optional refinement; penalty boxes and the centre circle were dropped. Edge

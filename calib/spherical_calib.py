@@ -290,13 +290,20 @@ def calibration_from_traces(src, span=None, verbose=True):
 
     traces = []
     used = {}
+    dropped = 0
     for ln in data.get("lines", []):
         lab = ln.get("label")
         if lab not in geom:
             continue
         for pt in ln.get("points", []):
-            traces.append((float(pt[0]), float(pt[1]), lab))
+            x, y = float(pt[0]), float(pt[1])
+            if not (0 <= x < W and 0 <= y < H):     # off-frame pixel = not a valid sample
+                dropped += 1
+                continue
+            traces.append((x, y, lab))
             used[lab] = used.get(lab, 0) + 1
+    if verbose and dropped:
+        print(f"  dropped {dropped} point(s) outside the {int(W)}x{int(H)} frame")
     if not traces:
         raise RuntimeError("no usable traces (labels must match the known pitch features)")
 
@@ -304,8 +311,36 @@ def calibration_from_traces(src, span=None, verbose=True):
     # (span <-> camera pose trade off), so a bad fit could pass validation while
     # corrupting metres. Default: assume 180 and let a wrong assumption fail loudly.
     fit_vs = bool(data.get("fit_vspan", False))
-    sol = solve_pose(traces, W, H, span, geom=geom, fit_vspan=fit_vs,
-                     vspan0=float(data.get("vspan_deg", 180.0)))
+    vspan0 = float(data.get("vspan_deg", 180.0))
+
+    def _solve(ts):
+        return solve_pose(ts, W, H, span, geom=geom, fit_vspan=fit_vs, vspan0=vspan0)
+
+    sol = _solve(traces)
+
+    # Robustness: one mistraced line must not invalidate the whole calibration.
+    # Drop a label whose median residual is far worse than the rest, then re-solve.
+    dropped_labels = []
+    for _ in range(3):
+        if len({l for _, _, l in traces}) <= 3:
+            break
+        pose = {"P": np.array(sol["P"]), "rvec": np.array(sol["rvec"])}
+        per = {}
+        for x, y, l in traces:
+            gx, gz = equirect_to_pitch(x, y, pose, W, H, span, sol["vspan"])
+            g = np.array([float(np.ravel(gx)[0]), float(np.ravel(gz)[0])])
+            per.setdefault(l, []).append(float(np.ravel(label_residual(g, geom[l]))[0]))
+        meds = {l: float(np.median(v)) for l, v in per.items()}
+        bad = [l for l, m in meds.items()
+               if m > max(4.0, 6.0 * float(np.median(list(meds.values()))))]
+        if not bad:
+            break
+        dropped_labels += bad
+        traces = [t for t in traces if t[2] not in bad]
+        used = {l: n for l, n in used.items() if l not in bad}
+        if verbose:
+            print(f"  dropped line(s) {bad} (median {max(meds[b] for b in bad):.1f} m) -> re-solving")
+        sol = _solve(traces)
     # validity on the MEDIAN residual: the RMS is dominated by near-horizon traces
     # where a pixel maps to metres of ground, which says nothing about fit quality.
     valid = bool(sol["med_m"] < RMS_VALID_M and sol["n"] >= 12)
@@ -323,7 +358,8 @@ def calibration_from_traces(src, span=None, verbose=True):
         "traced_features": {"labels": sorted(used), "points_per_label": used},
         "quality": {"med_m": sol["med_m"], "rms_m": sol["rms_m"], "rms_px": sol["rms_px"],
                     "n_points": sol["n"], "valid": valid,
-                    "valid_threshold_m": RMS_VALID_M},
+                    "valid_threshold_m": RMS_VALID_M,
+                    "dropped_labels": dropped_labels},
     }
     if verbose:
         print(f"calibration: {sol['n']} pts from {sorted(used)}")
