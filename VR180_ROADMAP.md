@@ -97,6 +97,8 @@ Target user: an amateur club coach — one fixed 180° camera pitch-side, no ope
 | Calibration solver | pose recovered from synthetic traces: 0.000 m clean, 0.19–0.31 % @1–2 px click noise |
 | Metric mapping | round-trip 0.0000 m; end-to-end < 0.52 m @2 px noise |
 | Metric gate + ROI | vspan honoured; above-horizon rays → `pitch_m` omitted; `calibration_valid=false` withholds metres; ROI = calibration-derived pitch rectangle (players by ground contact, ball by ground projection), grass hull fallback |
+| Calibration input | the **4-corner pitch outline alone** recovers the pose to ~0.8 m @2 px click noise; adding the halfway line → ~0.5 m. Penalty boxes / centre circle are NOT needed. |
+| Calib tool contract | pen-tool output (4 corners + bent edges per shape) round-trips through `calib/calibrate.py`: pose recovered to 0.003 m; extra `goal_*` labels ignored |
 | Goal geometry | synthetic PASS (roll-in detected; wide / over-bar / far-away rejected) |
 
 ### Open / blocked
@@ -125,7 +127,9 @@ spherical_tiling.py       detect_content_region, detect_span, build_grid, tile_e
                           hemisphere_mask, tile_pixel_to_equirect, merge_to_equirect (centre-NMS),
                           grass_roi_polygon, roi_filter, sidecar <video>.equirect.json
 virtual_camera.py         compute_camera_pose (smooth follow; tested)
-calib/calibrate.html      freehand pen tool: trace curved lines + pitch size -> calib_equirect.json
+calib/calibrate.html      PEN TOOL: click 4 corners per shape (pitch, each goal) then
+                          drag handles to bend each edge onto the curved line; halfway
+                          optional + pitch size -> calib_equirect.json
 calib/spherical_calib.py  pose solver (6-DoF, exact line residuals), equirect_to_pitch /
                           pitch_to_equirect, calibration_from_traces (contract v1)
 calib/calibrate.py        CLI: trace file -> calibration.json
@@ -248,6 +252,11 @@ auto-detects and de-stacks (takes one eye).
   `vspan_deg`. Mismatching it scales every metre silently.
 - **ROI = calibration-derived pitch rectangle** (ground projection; players by
   bbox ground contact, ball by centre), grass hull kept only as the fallback.
+- **Calibration input = 4 corners per shape + bendable edges** (pen tool), NOT
+  freehand tracing. Only the pitch outline is required; the halfway line is an
+  optional refinement; penalty boxes and the centre circle were dropped. Edge
+  labels are assigned by image position (near = lower in frame), so the recovered
+  pose may be the pitch's mirror twin — harmless, the pitch is D2-symmetric.
 
 ## 8. Commit trail (chronological)
 `bed22d8` flat fixes → `5fd12cc`/`09d1518` Projection Phase 1 →

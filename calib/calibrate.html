@@ -1,6 +1,6 @@
 <!doctype html>
 <html><head><meta charset="utf-8">
-<title>Equirect pitch calibration</title>
+<title>Equirect pitch calibration — pen tool</title>
 <style>
   :root{--bg:#14181d;--fg:#e8eaed;--mut:#9aa0a6;--acc:#4c8bf5}
   *{box-sizing:border-box} html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);
@@ -12,37 +12,52 @@
   button:hover{background:#2b333d} button.on{background:var(--acc);border-color:var(--acc)}
   #wrap{position:absolute;inset:46px 0 0 0;overflow:hidden;touch-action:none}
   canvas{display:block;position:absolute;left:0;top:0}
-  #hint{position:absolute;left:10px;bottom:10px;background:#0009;padding:6px 10px;border-radius:6px;
-    color:var(--mut);font-size:12px;pointer-events:none}
+  #hint{position:absolute;left:10px;bottom:10px;max-width:640px;background:#0009;padding:8px 11px;
+    border-radius:6px;color:var(--mut);font-size:12px;pointer-events:none;line-height:1.5}
+  #hint b{color:var(--fg)}
   #info{margin-left:auto;color:var(--mut);font-variant-numeric:tabular-nums}
   .grp{display:flex;gap:6px;align-items:center;color:var(--mut)}
+  .swatch{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:middle}
 </style></head>
 <body>
 <div id="bar">
   <input type="file" id="file" accept="image/*">
   <span class="grp"><b>Pitch:</b>
     <select id="preset"></select>
-    <input type="number" id="plen" step="0.5" style="width:66px"> ×
-    <input type="number" id="pwid" step="0.5" style="width:66px"> m
+    <input type="number" id="plen" step="0.5" style="width:64px"> ×
+    <input type="number" id="pwid" step="0.5" style="width:64px"> m
   </span>
-  <select id="label"></select>
-  <button id="undo">Undo stroke</button>
-  <button id="clearlab">Clear this label</button>
-  <button id="clearall">Clear all</button>
+  <button id="t_pitch">Pitch <span class="swatch" style="background:#40c4ff"></span></button>
+  <button id="t_goal_left">Goal L <span class="swatch" style="background:#69f0ae"></span></button>
+  <button id="t_goal_right">Goal R <span class="swatch" style="background:#ffd740"></span></button>
+  <button id="t_halfway">Halfway <span class="swatch" style="background:#e040fb"></span></button>
+  <button id="undo">Undo</button>
+  <button id="clearall">Clear</button>
   <button id="save">Save JSON</button>
   <button id="fit">Fit</button>
   <span id="info"></span>
 </div>
 <div id="wrap"><canvas id="cv"></canvas>
-  <div id="hint">drag to DRAW a curve along the line &middot; wheel = zoom &middot; shift-drag = pan &middot; pick a label first</div>
+  <div id="hint"></div>
 </div>
 <script>
-const LABELS = ["touchline_near","touchline_far","goal_line_left","goal_line_right","halfway",
-  "penalty_box_left","penalty_box_right","centre_circle","goal_left","goal_right"];
-const COLORS = ["#ff5252","#40c4ff","#69f0ae","#ffd740","#e040fb","#ff6e40","#64ffda","#b2ff59","#ff4081","#18ffff"];
+// ---------------------------------------------------------------------------
+// Pen tool: click the corners of a shape, then drag the round handles to bend
+// each edge onto the curved line. Curves are quadratic Beziers.
+//
+//   Pitch   -> 4 corners -> the 4 pitch boundary lines (drives the pose solve)
+//   Goal L/R-> 4 corners -> the goal mouth (its ground edge reinforces the goal line)
+//   Halfway -> 2 points  -> the halfway line (OPTIONAL; the outline alone is enough)
+// ---------------------------------------------------------------------------
 const cv=document.getElementById('cv'), ctx=cv.getContext('2d');
-const info=document.getElementById('info'), lblSel=document.getElementById('label');
-LABELS.forEach(l=>lblSel.append(new Option(l,l)));
+const info=document.getElementById('info'), hint=document.getElementById('hint');
+
+const TYPES={
+  pitch:      {corners:4, closed:true,  color:'#40c4ff', name:'Pitch'},
+  goal_left:  {corners:4, closed:true,  color:'#69f0ae', name:'Goal left'},
+  goal_right: {corners:4, closed:true,  color:'#ffd740', name:'Goal right'},
+  halfway:    {corners:2, closed:false, color:'#e040fb', name:'Halfway'},
+};
 
 // ---- pitch dimensions (the system asks for the real pitch size) ----
 const PRESETS={
@@ -60,8 +75,14 @@ pwid.oninput=()=>{pitch.width=+pwid.value; presetSel.value='custom';};
 syncP();
 
 // ---- state ----
-let img=new Image(), view={s:1,tx:0,ty:0}, lines=[], drawing=false, panning=null, cur=null;
+let img=new Image(), view={s:1,tx:0,ty:0};
+let shapes=[];            // [{type, corners:[[x,y]..], ctrls:[[x,y]..]}]
+let tool=null;            // active placement type, or null
+let pending=[];           // clicked corners so far for the active tool
+let drag=null;            // {si, kind:'corner'|'ctrl', i}
+let panning=null;
 const toImg=(px,py)=>[(px-view.tx)/view.s,(py-view.ty)/view.s];
+const toScr=(x,y)=>[x*view.s+view.tx, y*view.s+view.ty];
 
 function resize(){const w=cv.parentElement.clientWidth,h=cv.parentElement.clientHeight;
   cv.width=w;cv.height=h;ctx.imageSmoothingEnabled=view.s<1;}
@@ -69,68 +90,165 @@ function fit(){const w=cv.parentElement.clientWidth,h=cv.parentElement.clientHei
   const s=Math.min(w/img.naturalWidth,h/img.naturalHeight)*0.98;
   view={s,tx:(w-img.naturalWidth*s)/2,ty:(h-img.naturalHeight*s)/2};resize();draw();}
 
-function smooth(pts){ if(pts.length<5) return pts;
-  const out=pts.map((_,i)=>{ const a=pts[Math.max(0,i-1)],b=pts[i],c=pts[Math.min(pts.length-1,i+1)];
-    return [(a[0]+2*b[0]+c[0])/4,(a[1]+2*b[1]+c[1])/4]; });
-  out[0]=pts[0]; out[out.length-1]=pts[pts.length-1]; return out; }
+// ---- geometry ----
+const bez=(p0,p1,p2,t)=>{const u=1-t;return [u*u*p0[0]+2*u*t*p1[0]+t*t*p2[0], u*u*p0[1]+2*u*t*p1[1]+t*t*p2[1]];};
+const bezSample=(p0,p1,p2,n=20)=>Array.from({length:n+1},(_,i)=>bez(p0,p1,p2,i/n));
+const ctrlFromMid=(mid,a,b)=>[(4*mid[0]-a[0]-b[0])/2,(4*mid[1]-a[1]-b[1])/2];
+const midOf=(a,b)=>[(a[0]+b[0])/2,(a[1]+b[1])/2];
+function edgesOf(sh){
+  const c=sh.corners, n=c.length, m=TYPES[sh.type].closed?n:n-1, out=[];
+  for(let i=0;i<m;i++){ out.push({a:c[i], b:c[(i+1)%n], ctrl:sh.ctrls[i]}); }
+  return out;
+}
+function withDefaults(type,corners){
+  const c=shuffleLoop(corners), n=c.length, closed=TYPES[type].closed,
+        m=closed?n:n-1, ctrls=[];
+  for(let i=0;i<m;i++) ctrls.push(midOf(c[i],c[(i+1)%n]));
+  return {type,corners:c,ctrls};
+}
+// order the clicked corners into a simple loop (counter-clockwise, by angle)
+function shuffleLoop(pts){
+  if(pts.length<3) return pts.map(p=>[p[0],p[1]]);
+  const cx=pts.reduce((s,p)=>s+p[0],0)/pts.length, cy=pts.reduce((s,p)=>s+p[1],0)/pts.length;
+  return pts.map(p=>[p[0],p[1]]).sort((p,q)=>Math.atan2(p[1]-cy,p[0]-cx)-Math.atan2(q[1]-cy,q[0]-cx));
+}
+// pitch edges -> physical line labels, by image position (see note in save)
+function pitchLabels(sh){
+  const e=edgesOf(sh);
+  const mid=e.map((g,i)=>({i, my:(g.a[1]+g.b[1])/2, mx:(g.a[0]+g.b[0])/2}));
+  const byY=[...mid].sort((p,q)=>q.my-p.my);           // larger y = lower in image = NEAR
+  const near=byY[0].i, far=byY[1].i;
+  const rest=byY.slice(2).sort((p,q)=>p.mx-q.mx);      // smaller x = left
+  const lab={}; lab[near]='touchline_near'; lab[far]='touchline_far';
+  lab[rest[0].i]='goal_line_left'; lab[rest[1].i]='goal_line_right';
+  return lab;
+}
+const lowestEdge=(sh)=>{const e=edgesOf(sh);let bi=0,by=-1e9;
+  e.forEach((g,i)=>{const my=(g.a[1]+g.b[1])/2; if(my>by){by=my;bi=i;}}); return bi;};
 
+// ---- draw ----
 function draw(){
   ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,cv.width,cv.height);
   ctx.setTransform(view.s,0,0,view.s,view.tx,view.ty);
   if(img.complete&&img.naturalWidth) ctx.drawImage(img,0,0);
-  ctx.lineWidth=3/view.s; ctx.lineJoin='round'; ctx.lineCap='round';
-  const stroke=(pts,col,close)=>{ if(pts.length<2)return; ctx.strokeStyle=col; ctx.beginPath();
-    pts.forEach(([x,y],j)=>j?ctx.lineTo(x,y):ctx.moveTo(x,y)); if(close)ctx.closePath(); ctx.stroke(); };
-  lines.forEach(ln=>{ const c=COLORS[Math.max(0,LABELS.indexOf(ln.label))%COLORS.length];
-    stroke(ln.pts,c,ln.closed); });
-  if(cur) stroke(cur.pts,'#ffffff',false);
+  ctx.lineJoin='round'; ctx.lineCap='round';
+
+  const drawShape=(sh,ptsOnly)=>{
+    const t=TYPES[sh.type], e=edgesOf(sh);
+    ctx.strokeStyle=t.color; ctx.lineWidth=2.5/view.s;
+    e.forEach(g=>{ const s=bezSample(g.a,g.ctrl,g.b,24);
+      ctx.beginPath(); s.forEach(([x,y],j)=>j?ctx.lineTo(x,y):ctx.moveTo(x,y)); ctx.stroke(); });
+    if(ptsOnly) return;
+    // anchors (squares)
+    sh.corners.forEach(([x,y])=>{ const r=4/view.s; ctx.fillStyle=t.color;
+      ctx.fillRect(x-r,y-r,2*r,2*r); ctx.strokeStyle='#000'; ctx.lineWidth=1/view.s; ctx.strokeRect(x-r,y-r,2*r,2*r); });
+    // curve handles (circles) at the curve midpoint
+    e.forEach(g=>{ const m=bez(g.a,g.ctrl,g.b,0.5), r=5/view.s;
+      ctx.beginPath(); ctx.arc(m[0],m[1],r,0,7); ctx.fillStyle='#14181d'; ctx.fill();
+      ctx.strokeStyle=t.color; ctx.lineWidth=2/view.s; ctx.stroke(); });
+  };
+  shapes.forEach(sh=>drawShape(sh));
+
+  // labels on the pitch edges
+  const ps=shapes.find(s=>s.type==='pitch');
+  if(ps){ const lab=pitchLabels(ps); ctx.font=`${11/view.s}px system-ui`;
+    edgesOf(ps).forEach((g,i)=>{ const m=bez(g.a,g.ctrl,g.b,0.5);
+      ctx.fillStyle='#000'; const w=ctx.measureText(lab[i]).width/view.s;
+      ctx.fillRect(m[0]-w/2-2/view.s, m[1]-13/view.s, w+4/view.s, 12/view.s);
+      ctx.fillStyle='#40c4ff'; ctx.textAlign='center'; ctx.fillText(lab[i],m[0],m[1]-4/view.s); });
+    ctx.textAlign='left'; }
+
+  // in-progress placement
+  ctx.strokeStyle='#fff'; ctx.fillStyle='#fff'; ctx.lineWidth=2/view.s;
+  pending.forEach(([x,y])=>{ const r=4/view.s; ctx.beginPath(); ctx.arc(x,y,r,0,7); ctx.fill(); });
+  if(pending.length>1){ ctx.beginPath(); ctx.moveTo(...pending[0]);
+    pending.slice(1).forEach(p=>ctx.lineTo(...p)); ctx.stroke();
+    if(pending.length===TYPES[tool]?.corners) ctx.closePath(), ctx.stroke(); }
   ctx.setTransform(1,0,0,1,0,0);
-  const pts=lines.reduce((a,l)=>a+l.pts.length,0);
-  info.textContent=`${img.naturalWidth||0}×${img.naturalHeight||0} · ${lines.length} stroke(s) · ${pts} pts · zoom ${view.s.toFixed(2)}×`;
+
+  info.textContent=`${img.naturalWidth||0}×${img.naturalHeight||0} · ${shapes.length} shape(s) · zoom ${view.s.toFixed(2)}×`;
+  hint.innerHTML = tool
+    ? `Placing <b>${TYPES[tool].name}</b> — click ${TYPES[tool].corners} corner(s) (${pending.length}/${TYPES[tool].corners}). Esc cancels.`
+    : 'Pick a shape, click its corners, then <b>drag the round handles</b> to bend each edge onto the line. '+
+      'Wheel = zoom · shift-drag = pan.';
 }
 
+// ---- hit testing ----
+const R_SCREEN=10;
+function pick(px,py){
+  for(let si=shapes.length-1;si>=0;si--){ const sh=shapes[si];
+    for(let i=0;i<sh.corners.length;i++){ const [sx,sy]=toScr(...sh.corners[i]);
+      if(Math.hypot(sx-px,sy-py)<R_SCREEN) return {si,kind:'corner',i}; }
+    const e=edgesOf(sh);
+    for(let i=0;i<e.length;i++){ const m=bez(e[i].a,e[i].ctrl,e[i].b,0.5), [sx,sy]=toScr(...m);
+      if(Math.hypot(sx-px,sy-py)<R_SCREEN) return {si,kind:'ctrl',i}; }
+  }
+  return null;
+}
+
+// ---- interaction ----
 cv.addEventListener('pointerdown',e=>{
   if(e.shiftKey||e.button===1){ panning=[e.clientX,e.clientY,view.tx,view.ty]; return; }
-  cv.setPointerCapture(e.pointerId);
   const [x,y]=toImg(e.offsetX,e.offsetY);
-  cur={label:lblSel.value,pts:[[x,y]]}; drawing=true; draw();
+  if(tool){
+    pending.push([x,y]);
+    if(pending.length>=TYPES[tool].corners){ shapes=shapes.filter(s=>s.type!==tool);
+      shapes.push(withDefaults(tool,pending)); pending=[]; setTool(null); }
+    draw(); return;
+  }
+  const hit=pick(e.offsetX,e.offsetY);
+  if(hit){ cv.setPointerCapture(e.pointerId); drag=hit; }
 });
 cv.addEventListener('pointermove',e=>{
   if(panning){ view.tx=panning[2]+(e.clientX-panning[0]); view.ty=panning[3]+(e.clientY-panning[1]); draw(); return; }
-  if(!drawing||!cur) return;
-  const [x,y]=toImg(e.offsetX,e.offsetY), last=cur.pts[cur.pts.length-1];
-  if(Math.hypot(x-last[0],y-last[1])*view.s < 3) return;      // decimate: >=3 screen px
-  cur.pts.push([x,y]); draw();
+  if(drag){ const [x,y]=toImg(e.offsetX,e.offsetY), sh=shapes[drag.si];
+    if(drag.kind==='corner') sh.corners[drag.i]=[x,y];
+    else { const g=edgesOf(sh)[drag.i]; sh.ctrls[drag.i]=ctrlFromMid([x,y],g.a,g.b); }
+    draw(); }
 });
-const endStroke=()=>{ if(!drawing) return; drawing=false;
-  if(cur&&cur.pts.length>=3){ cur.pts=smooth(cur.pts).map(p=>[+p[0].toFixed(1),+p[1].toFixed(1)]); lines.push(cur); }
-  cur=null; draw(); };
-cv.addEventListener('pointerup',endStroke);
-cv.addEventListener('pointercancel',endStroke);
-cv.addEventListener('pointerleave',()=>{ if(drawing) endStroke(); });
+const endDrag=()=>drag=null;
+cv.addEventListener('pointerup',endDrag);
+cv.addEventListener('pointercancel',endDrag);
 cv.addEventListener('wheel',e=>{ e.preventDefault();
   const f=e.deltaY<0?1.15:1/1.15,[ix,iy]=toImg(e.offsetX,e.offsetY);
   view.s*=f; view.tx=e.offsetX-ix*view.s; view.ty=e.offsetY-iy*view.s; draw(); },{passive:false});
 window.addEventListener('mouseup',()=>panning=null);
+window.addEventListener('keydown',e=>{ if(e.key==='Escape'){ pending=[]; setTool(null); draw(); } });
 
-document.getElementById('undo').onclick=()=>{lines.pop();draw();};
-document.getElementById('clearlab').onclick=()=>{const L=lblSel.value;lines=lines.filter(l=>l.label!==L);draw();};
-document.getElementById('clearall').onclick=()=>{if(confirm('Clear all strokes?')){lines=[];draw();}};
+function setTool(t){ tool=t;
+  for(const k of Object.keys(TYPES)) document.getElementById('t_'+k).classList.toggle('on',k===t);
+  if(t) pending=[]; draw(); }
+for(const k of Object.keys(TYPES)) document.getElementById('t_'+k).onclick=()=>setTool(tool===k?null:k);
+
+document.getElementById('undo').onclick=()=>{ if(pending.length) pending.pop();
+  else shapes.pop(); draw(); };
+document.getElementById('clearall').onclick=()=>{ if(confirm('Clear all shapes?')){shapes=[];pending=[];setTool(null);draw();} };
 document.getElementById('fit').onclick=fit;
+
 document.getElementById('save').onclick=()=>{
-  // merge multiple strokes with the same label into one polyline
-  const byLabel={}; lines.forEach(l=>{ (byLabel[l.label]=byLabel[l.label]||[]).push(...l.pts); });
+  const lines=[]; const add=(label,pts)=>lines.push({label,points:pts.map(p=>[+p[0].toFixed(1),+p[1].toFixed(1)])});
+  const ps=shapes.find(s=>s.type==='pitch');
+  if(ps){ const lab=pitchLabels(ps); edgesOf(ps).forEach((g,i)=>add(lab[i],bezSample(g.a,g.ctrl,g.b,24))); }
+  for(const t of ['goal_left','goal_right']){ const sh=shapes.find(s=>s.type===t); if(!sh) continue;
+    const e=edgesOf(sh), gi=lowestEdge(sh);
+    // record the whole quad, and fold its ground edge into the matching goal line
+    const whole=[]; e.forEach(g=>whole.push(...bezSample(g.a,g.ctrl,g.b,16))); add(t,whole);
+    add(t==='goal_left'?'goal_line_left':'goal_line_right', bezSample(e[gi].a,e[gi].ctrl,e[gi].b,24)); }
+  const hs=shapes.find(s=>s.type==='halfway');
+  if(hs){ const g=edgesOf(hs)[0]; add('halfway', bezSample(g.a,g.ctrl,g.b,24)); }
+
+  if(!lines.length){ alert('Nothing to save — draw at least the pitch.'); return; }
   const data={ image:img.dataset.name||'frame.jpg', size:[img.naturalWidth,img.naturalHeight],
-    span:180, crop:null, pitch:Object.assign({},pitch,{length:+plen.value,width:+pwid.value}),
-    lines:Object.entries(byLabel).map(([label,points])=>({label,points})) };
+    span:180, crop:null, pitch:Object.assign({},pitch,{length:+plen.value,width:+pwid.value}), lines };
   const blob=new Blob([JSON.stringify(data,null,1)],{type:'application/json'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='calib_equirect.json'; a.click();
 };
 document.getElementById('file').onchange=e=>{const f=e.target.files[0]; if(!f)return;
   const n=new Image(); n.dataset.name=f.name; n.onload=fit; n.src=URL.createObjectURL(f);
-  img=n; lines=[]; };
+  img=n; shapes=[]; pending=[]; setTool(null); };
 img.dataset.name='frame_85s.jpg'; img.onload=fit;
 img.onerror=()=>{info.textContent='load an equirect frame with the file picker';};
 img.src='frame_85s.jpg';
 window.addEventListener('resize',()=>{resize();draw();});
+setTool(null); resize(); draw();
 </script></body></html>
