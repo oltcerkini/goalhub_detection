@@ -176,12 +176,12 @@ function draw(){
   info.textContent=`${img.naturalWidth||0}×${img.naturalHeight||0} · ${shapes.length} shape(s) · zoom ${view.s.toFixed(2)}×`;
   hint.innerHTML = tool
     ? `Placing <b>${TYPES[tool].name}</b> — click ${TYPES[tool].corners} corner(s) (${pending.length}/${TYPES[tool].corners}). Esc cancels.`
-    : 'Shape the lines: <b>click a line to add a point</b>, drag points/corners to bend, <b>alt-click</b> a point to remove. '+
-      'Wheel = zoom · shift-drag = pan.';
+    : 'Click <b>anywhere along the real line</b> to add a point — the nearest edge bends to it. '+
+      'Drag points/corners to fine-tune · <b>alt-click</b> a point to remove · wheel = zoom · shift-drag = pan.';
 }
 
 // ---- hit testing ----
-const R_SCREEN=10, EDGE_SCREEN=8;
+const R_SCREEN=12;
 function pickPoint(px,py){
   for(let si=shapes.length-1;si>=0;si--){ const sh=shapes[si];
     for(let i=0;i<sh.corners.length;i++){ const [sx,sy]=toScr(...sh.corners[i]);
@@ -192,8 +192,9 @@ function pickPoint(px,py){
   }
   return null;
 }
-function pickEdge(px,py){          // nearest edge to a click, within EDGE_SCREEN
-  let best=null, bd=EDGE_SCREEN;
+// nearest edge to a click, UNBOUNDED: click anywhere and the nearest edge bends to you
+function pickEdge(px,py){
+  let best=null, bd=Infinity;
   shapes.forEach((sh,si)=>{ for(let i=0;i<edgeCount(sh);i++){ const s=sampleEdge(sh,i);
     for(const [x,y] of s){ const [sx,sy]=toScr(x,y), d=Math.hypot(sx-px,sy-py);
       if(d<bd){ bd=d; best={si,i}; } } } });
