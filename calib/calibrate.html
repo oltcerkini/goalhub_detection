@@ -10,9 +10,9 @@
   button,select,input[type=file],input[type=number]{background:#232a33;color:var(--fg);
     border:1px solid #333c47;border-radius:6px;padding:6px 9px;font:inherit;cursor:pointer}
   button:hover{background:#2b333d} button.on{background:var(--acc);border-color:var(--acc)}
-  #wrap{position:absolute;inset:46px 0 0 0;overflow:hidden;touch-action:none}
+  #wrap{position:absolute;inset:46px 0 0 0;overflow:hidden;touch-action:none;cursor:crosshair}
   canvas{display:block;position:absolute;left:0;top:0}
-  #hint{position:absolute;left:10px;bottom:10px;max-width:640px;background:#0009;padding:8px 11px;
+  #hint{position:absolute;left:10px;bottom:10px;max-width:680px;background:#0009;padding:8px 11px;
     border-radius:6px;color:var(--mut);font-size:12px;pointer-events:none;line-height:1.5}
   #hint b{color:var(--fg)}
   #info{margin-left:auto;color:var(--mut);font-variant-numeric:tabular-nums}
@@ -42,8 +42,12 @@
 </div>
 <script>
 // ---------------------------------------------------------------------------
-// Pen tool: click the corners of a shape, then drag the round handles to bend
-// each edge onto the curved line. Curves are quadratic Beziers.
+// Pen tool. Pick a shape, click its 4 corners, then SHAPE each edge:
+//   - click on a line       -> add a point there
+//   - drag a point / corner -> move it (the curve bends through your points)
+//   - alt-click a point     -> remove it
+// Edges are smooth Catmull-Rom splines through the corner + added points, so
+// you can put as many bends on a line as it needs.
 //
 //   Pitch   -> 4 corners -> the 4 pitch boundary lines (drives the pose solve)
 //   Goal L/R-> 4 corners -> the goal mouth (its ground edge reinforces the goal line)
@@ -76,10 +80,11 @@ syncP();
 
 // ---- state ----
 let img=new Image(), view={s:1,tx:0,ty:0};
-let shapes=[];            // [{type, corners:[[x,y]..], ctrls:[[x,y]..]}]
+let shapes=[];            // [{type, corners:[[x,y]..], knots:[[ [x,y].. ]..]}]
+let history=[];           // snapshots for undo
 let tool=null;            // active placement type, or null
 let pending=[];           // clicked corners so far for the active tool
-let drag=null;            // {si, kind:'corner'|'ctrl', i}
+let drag=null;            // {si, kind:'corner'|'knot', i, k}
 let panning=null;
 const toImg=(px,py)=>[(px-view.tx)/view.s,(py-view.ty)/view.s];
 const toScr=(x,y)=>[x*view.s+view.tx, y*view.s+view.ty];
@@ -91,40 +96,45 @@ function fit(){const w=cv.parentElement.clientWidth,h=cv.parentElement.clientHei
   view={s,tx:(w-img.naturalWidth*s)/2,ty:(h-img.naturalHeight*s)/2};resize();draw();}
 
 // ---- geometry ----
-const bez=(p0,p1,p2,t)=>{const u=1-t;return [u*u*p0[0]+2*u*t*p1[0]+t*t*p2[0], u*u*p0[1]+2*u*t*p1[1]+t*t*p2[1]];};
-const bezSample=(p0,p1,p2,n=20)=>Array.from({length:n+1},(_,i)=>bez(p0,p1,p2,i/n));
-const ctrlFromMid=(mid,a,b)=>[(4*mid[0]-a[0]-b[0])/2,(4*mid[1]-a[1]-b[1])/2];
 const midOf=(a,b)=>[(a[0]+b[0])/2,(a[1]+b[1])/2];
-function edgesOf(sh){
-  const c=sh.corners, n=c.length, m=TYPES[sh.type].closed?n:n-1, out=[];
-  for(let i=0;i<m;i++){ out.push({a:c[i], b:c[(i+1)%n], ctrl:sh.ctrls[i]}); }
+const edgeCount=(sh)=>{const n=sh.corners.length; return TYPES[sh.type].closed?n:n-1;};
+// control points of edge i:   corner_i, ...added points..., corner_{i+1}
+function controlPts(sh,i){ const n=sh.corners.length; return [sh.corners[i], ...(sh.knots[i]||[]), sh.corners[(i+1)%n]]; }
+// Catmull-Rom spline through pts (interpolating); ends duplicated
+function catmullRom(pts,seg=14){
+  if(pts.length<2) return pts.map(p=>[p[0],p[1]]);
+  const P=[pts[0],...pts,pts[pts.length-1]], out=[];
+  for(let i=1;i<P.length-2;i++){ const p0=P[i-1],p1=P[i],p2=P[i+1],p3=P[i+2];
+    for(let j=0;j<seg;j++){ const t=j/seg,t2=t*t,t3=t2*t;
+      out.push([
+        0.5*(2*p1[0]+(-p0[0]+p2[0])*t+(2*p0[0]-5*p1[0]+4*p2[0]-p3[0])*t2+(-p0[0]+3*p1[0]-3*p2[0]+p3[0])*t3),
+        0.5*(2*p1[1]+(-p0[1]+p2[1])*t+(2*p0[1]-5*p1[1]+4*p2[1]-p3[1])*t2+(-p0[1]+3*p1[1]-3*p2[1]+p3[1])*t3)]); } }
+  out.push([pts[pts.length-1][0],pts[pts.length-1][1]]);
   return out;
 }
+const sampleEdge=(sh,i,seg=14)=>catmullRom(controlPts(sh,i),seg);
+
 function withDefaults(type,corners){
-  const c=shuffleLoop(corners), n=c.length, closed=TYPES[type].closed,
-        m=closed?n:n-1, ctrls=[];
-  for(let i=0;i<m;i++) ctrls.push(midOf(c[i],c[(i+1)%n]));
-  return {type,corners:c,ctrls};
+  const c=loop(corners), m=TYPES[type].closed?c.length:c.length-1;
+  return {type,corners:c,knots:Array.from({length:m},()=>[])};
 }
-// order the clicked corners into a simple loop (counter-clockwise, by angle)
-function shuffleLoop(pts){
-  if(pts.length<3) return pts.map(p=>[p[0],p[1]]);
+function loop(pts){ if(pts.length<3) return pts.map(p=>[p[0],p[1]]);
   const cx=pts.reduce((s,p)=>s+p[0],0)/pts.length, cy=pts.reduce((s,p)=>s+p[1],0)/pts.length;
-  return pts.map(p=>[p[0],p[1]]).sort((p,q)=>Math.atan2(p[1]-cy,p[0]-cx)-Math.atan2(q[1]-cy,q[0]-cx));
-}
-// pitch edges -> physical line labels, by image position (see note in save)
+  return pts.map(p=>[p[0],p[1]]).sort((p,q)=>Math.atan2(p[1]-cy,p[0]-cx)-Math.atan2(q[1]-cy,q[0]-cx)); }
+
+// pitch edges -> physical line labels, by image position (lower in frame = near)
 function pitchLabels(sh){
-  const e=edgesOf(sh);
-  const mid=e.map((g,i)=>({i, my:(g.a[1]+g.b[1])/2, mx:(g.a[0]+g.b[0])/2}));
-  const byY=[...mid].sort((p,q)=>q.my-p.my);           // larger y = lower in image = NEAR
-  const near=byY[0].i, far=byY[1].i;
-  const rest=byY.slice(2).sort((p,q)=>p.mx-q.mx);      // smaller x = left
-  const lab={}; lab[near]='touchline_near'; lab[far]='touchline_far';
+  const n=sh.corners.length, m=edgeCount(sh);
+  const mid=Array.from({length:m},(_,i)=>({i, my:(sh.corners[i][1]+sh.corners[(i+1)%n][1])/2,
+                                              mx:(sh.corners[i][0]+sh.corners[(i+1)%n][0])/2}));
+  const byY=[...mid].sort((p,q)=>q.my-p.my);
+  const near=byY[0].i, far=byY[1].i, rest=byY.slice(2).sort((p,q)=>p.mx-q.mx), lab={};
+  lab[near]='touchline_near'; lab[far]='touchline_far';
   lab[rest[0].i]='goal_line_left'; lab[rest[1].i]='goal_line_right';
   return lab;
 }
-const lowestEdge=(sh)=>{const e=edgesOf(sh);let bi=0,by=-1e9;
-  e.forEach((g,i)=>{const my=(g.a[1]+g.b[1])/2; if(my>by){by=my;bi=i;}}); return bi;};
+const lowestEdge=(sh)=>{const m=edgeCount(sh),n=sh.corners.length;let bi=0,by=-1e9;
+  for(let i=0;i<m;i++){const my=(sh.corners[i][1]+sh.corners[(i+1)%n][1])/2; if(my>by){by=my;bi=i;}} return bi;};
 
 // ---- draw ----
 function draw(){
@@ -133,77 +143,98 @@ function draw(){
   if(img.complete&&img.naturalWidth) ctx.drawImage(img,0,0);
   ctx.lineJoin='round'; ctx.lineCap='round';
 
-  const drawShape=(sh,ptsOnly)=>{
-    const t=TYPES[sh.type], e=edgesOf(sh);
-    ctx.strokeStyle=t.color; ctx.lineWidth=2.5/view.s;
-    e.forEach(g=>{ const s=bezSample(g.a,g.ctrl,g.b,24);
-      ctx.beginPath(); s.forEach(([x,y],j)=>j?ctx.lineTo(x,y):ctx.moveTo(x,y)); ctx.stroke(); });
-    if(ptsOnly) return;
-    // anchors (squares)
-    sh.corners.forEach(([x,y])=>{ const r=4/view.s; ctx.fillStyle=t.color;
-      ctx.fillRect(x-r,y-r,2*r,2*r); ctx.strokeStyle='#000'; ctx.lineWidth=1/view.s; ctx.strokeRect(x-r,y-r,2*r,2*r); });
-    // curve handles (circles) at the curve midpoint
-    e.forEach(g=>{ const m=bez(g.a,g.ctrl,g.b,0.5), r=5/view.s;
-      ctx.beginPath(); ctx.arc(m[0],m[1],r,0,7); ctx.fillStyle='#14181d'; ctx.fill();
-      ctx.strokeStyle=t.color; ctx.lineWidth=2/view.s; ctx.stroke(); });
-  };
-  shapes.forEach(sh=>drawShape(sh));
+  const R=4/view.s;                                    // corner half-size
+  shapes.forEach(sh=>{
+    const t=TYPES[sh.type]; ctx.strokeStyle=t.color; ctx.lineWidth=2.5/view.s;
+    for(let i=0;i<edgeCount(sh);i++){ const s=sampleEdge(sh,i);
+      ctx.beginPath(); s.forEach(([x,y],j)=>j?ctx.lineTo(x,y):ctx.moveTo(x,y)); ctx.stroke(); }
+    // corners (squares)
+    sh.corners.forEach(([x,y])=>{ ctx.fillStyle=t.color; ctx.fillRect(x-R,y-R,2*R,2*R);
+      ctx.strokeStyle='#000'; ctx.lineWidth=1/view.s; ctx.strokeRect(x-R,y-R,2*R,2*R); });
+    // added points (circles)
+    sh.knots.forEach(ks=>ks.forEach(([x,y])=>{ ctx.beginPath(); ctx.arc(x,y,4.5/view.s,0,7);
+      ctx.fillStyle='#14181d'; ctx.fill(); ctx.strokeStyle=t.color; ctx.lineWidth=2/view.s; ctx.stroke(); }));
+  });
 
-  // labels on the pitch edges
+  // live labels on the pitch edges
   const ps=shapes.find(s=>s.type==='pitch');
-  if(ps){ const lab=pitchLabels(ps); ctx.font=`${11/view.s}px system-ui`;
-    edgesOf(ps).forEach((g,i)=>{ const m=bez(g.a,g.ctrl,g.b,0.5);
+  if(ps){ const lab=pitchLabels(ps), n=ps.corners.length; ctx.font=`${11/view.s}px system-ui`;
+    for(let i=0;i<edgeCount(ps);i++){ const s=sampleEdge(ps,i,14), m=s[Math.floor(s.length/2)];
       ctx.fillStyle='#000'; const w=ctx.measureText(lab[i]).width/view.s;
       ctx.fillRect(m[0]-w/2-2/view.s, m[1]-13/view.s, w+4/view.s, 12/view.s);
-      ctx.fillStyle='#40c4ff'; ctx.textAlign='center'; ctx.fillText(lab[i],m[0],m[1]-4/view.s); });
+      ctx.fillStyle='#40c4ff'; ctx.textAlign='center'; ctx.fillText(lab[i],m[0],m[1]-4/view.s); }
     ctx.textAlign='left'; }
 
   // in-progress placement
   ctx.strokeStyle='#fff'; ctx.fillStyle='#fff'; ctx.lineWidth=2/view.s;
-  pending.forEach(([x,y])=>{ const r=4/view.s; ctx.beginPath(); ctx.arc(x,y,r,0,7); ctx.fill(); });
+  pending.forEach(([x,y])=>{ ctx.beginPath(); ctx.arc(x,y,R,0,7); ctx.fill(); });
   if(pending.length>1){ ctx.beginPath(); ctx.moveTo(...pending[0]);
     pending.slice(1).forEach(p=>ctx.lineTo(...p)); ctx.stroke();
-    if(pending.length===TYPES[tool]?.corners) ctx.closePath(), ctx.stroke(); }
+    if(pending.length===TYPES[tool]?.corners) { ctx.closePath(); ctx.stroke(); } }
   ctx.setTransform(1,0,0,1,0,0);
 
   info.textContent=`${img.naturalWidth||0}×${img.naturalHeight||0} · ${shapes.length} shape(s) · zoom ${view.s.toFixed(2)}×`;
   hint.innerHTML = tool
     ? `Placing <b>${TYPES[tool].name}</b> — click ${TYPES[tool].corners} corner(s) (${pending.length}/${TYPES[tool].corners}). Esc cancels.`
-    : 'Pick a shape, click its corners, then <b>drag the round handles</b> to bend each edge onto the line. '+
+    : 'Shape the lines: <b>click a line to add a point</b>, drag points/corners to bend, <b>alt-click</b> a point to remove. '+
       'Wheel = zoom · shift-drag = pan.';
 }
 
 // ---- hit testing ----
-const R_SCREEN=10;
-function pick(px,py){
+const R_SCREEN=10, EDGE_SCREEN=8;
+function pickPoint(px,py){
   for(let si=shapes.length-1;si>=0;si--){ const sh=shapes[si];
     for(let i=0;i<sh.corners.length;i++){ const [sx,sy]=toScr(...sh.corners[i]);
       if(Math.hypot(sx-px,sy-py)<R_SCREEN) return {si,kind:'corner',i}; }
-    const e=edgesOf(sh);
-    for(let i=0;i<e.length;i++){ const m=bez(e[i].a,e[i].ctrl,e[i].b,0.5), [sx,sy]=toScr(...m);
-      if(Math.hypot(sx-px,sy-py)<R_SCREEN) return {si,kind:'ctrl',i}; }
+    for(let i=0;i<sh.knots.length;i++) for(let k=0;k<sh.knots[i].length;k++){
+      const [sx,sy]=toScr(...sh.knots[i][k]);
+      if(Math.hypot(sx-px,sy-py)<R_SCREEN) return {si,kind:'knot',i,k}; }
   }
   return null;
 }
+function pickEdge(px,py){          // nearest edge to a click, within EDGE_SCREEN
+  let best=null, bd=EDGE_SCREEN;
+  shapes.forEach((sh,si)=>{ for(let i=0;i<edgeCount(sh);i++){ const s=sampleEdge(sh,i);
+    for(const [x,y] of s){ const [sx,sy]=toScr(x,y), d=Math.hypot(sx-px,sy-py);
+      if(d<bd){ bd=d; best={si,i}; } } } });
+  return best;
+}
+function insertKnotAt(sh,si,i,imgPt){
+  const cps=controlPts(sh,i), seg=14;          // find which control-segment the click is nearest
+  const s=catmullRom(cps,seg);
+  let bi=0,bd=1e9;
+  s.forEach((p,j)=>{ const d=Math.hypot(p[0]-imgPt[0],p[1]-imgPt[1]); if(d<bd){bd=d;bi=j;} });
+  const a=Math.min(cps.length-2, Math.floor(bi/seg));   // segment index
+  sh.knots[i].splice(a,0,[imgPt[0],imgPt[1]]);
+  return a;
+}
 
 // ---- interaction ----
+function snap(){ history.push(JSON.stringify(shapes)); if(history.length>80) history.shift(); }
+
 cv.addEventListener('pointerdown',e=>{
   if(e.shiftKey||e.button===1){ panning=[e.clientX,e.clientY,view.tx,view.ty]; return; }
   const [x,y]=toImg(e.offsetX,e.offsetY);
   if(tool){
     pending.push([x,y]);
-    if(pending.length>=TYPES[tool].corners){ shapes=shapes.filter(s=>s.type!==tool);
+    if(pending.length>=TYPES[tool].corners){ snap(); shapes=shapes.filter(s=>s.type!==tool);
       shapes.push(withDefaults(tool,pending)); pending=[]; setTool(null); }
     draw(); return;
   }
-  const hit=pick(e.offsetX,e.offsetY);
-  if(hit){ cv.setPointerCapture(e.pointerId); drag=hit; }
+  const hit=pickPoint(e.offsetX,e.offsetY);
+  if(hit){
+    if(e.altKey && hit.kind==='knot'){ snap(); shapes[hit.si].knots[hit.i].splice(hit.k,1); draw(); return; }
+    snap(); cv.setPointerCapture(e.pointerId); drag=hit; return;
+  }
+  const ed=pickEdge(e.offsetX,e.offsetY);       // click on a line -> add a point and grab it
+  if(ed){ snap(); const sh=shapes[ed.si], k=insertKnotAt(sh,ed.si,ed.i,[x,y]);
+    cv.setPointerCapture(e.pointerId); drag={si:ed.si,kind:'knot',i:ed.i,k}; draw(); }
 });
 cv.addEventListener('pointermove',e=>{
   if(panning){ view.tx=panning[2]+(e.clientX-panning[0]); view.ty=panning[3]+(e.clientY-panning[1]); draw(); return; }
   if(drag){ const [x,y]=toImg(e.offsetX,e.offsetY), sh=shapes[drag.si];
     if(drag.kind==='corner') sh.corners[drag.i]=[x,y];
-    else { const g=edgesOf(sh)[drag.i]; sh.ctrls[drag.i]=ctrlFromMid([x,y],g.a,g.b); }
+    else sh.knots[drag.i][drag.k]=[x,y];
     draw(); }
 });
 const endDrag=()=>drag=null;
@@ -213,29 +244,28 @@ cv.addEventListener('wheel',e=>{ e.preventDefault();
   const f=e.deltaY<0?1.15:1/1.15,[ix,iy]=toImg(e.offsetX,e.offsetY);
   view.s*=f; view.tx=e.offsetX-ix*view.s; view.ty=e.offsetY-iy*view.s; draw(); },{passive:false});
 window.addEventListener('mouseup',()=>panning=null);
-window.addEventListener('keydown',e=>{ if(e.key==='Escape'){ pending=[]; setTool(null); draw(); } });
+window.addEventListener('keydown',e=>{ if(e.key==='Escape'){ pending=[]; setTool(null); draw(); }
+  else if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'){ e.preventDefault(); undo(); } });
 
 function setTool(t){ tool=t;
   for(const k of Object.keys(TYPES)) document.getElementById('t_'+k).classList.toggle('on',k===t);
   if(t) pending=[]; draw(); }
 for(const k of Object.keys(TYPES)) document.getElementById('t_'+k).onclick=()=>setTool(tool===k?null:k);
 
-document.getElementById('undo').onclick=()=>{ if(pending.length) pending.pop();
-  else shapes.pop(); draw(); };
-document.getElementById('clearall').onclick=()=>{ if(confirm('Clear all shapes?')){shapes=[];pending=[];setTool(null);draw();} };
+function undo(){ if(pending.length){ pending.pop(); draw(); return; } if(history.length) shapes=JSON.parse(history.pop()); draw(); }
+document.getElementById('undo').onclick=undo;
+document.getElementById('clearall').onclick=()=>{ if(confirm('Clear all shapes?')){ snap(); shapes=[];pending=[];setTool(null);draw(); } };
 document.getElementById('fit').onclick=fit;
 
 document.getElementById('save').onclick=()=>{
   const lines=[]; const add=(label,pts)=>lines.push({label,points:pts.map(p=>[+p[0].toFixed(1),+p[1].toFixed(1)])});
   const ps=shapes.find(s=>s.type==='pitch');
-  if(ps){ const lab=pitchLabels(ps); edgesOf(ps).forEach((g,i)=>add(lab[i],bezSample(g.a,g.ctrl,g.b,24))); }
+  if(ps){ const lab=pitchLabels(ps); for(let i=0;i<edgeCount(ps);i++) add(lab[i],sampleEdge(ps,i,24)); }
   for(const t of ['goal_left','goal_right']){ const sh=shapes.find(s=>s.type===t); if(!sh) continue;
-    const e=edgesOf(sh), gi=lowestEdge(sh);
-    // record the whole quad, and fold its ground edge into the matching goal line
-    const whole=[]; e.forEach(g=>whole.push(...bezSample(g.a,g.ctrl,g.b,16))); add(t,whole);
-    add(t==='goal_left'?'goal_line_left':'goal_line_right', bezSample(e[gi].a,e[gi].ctrl,e[gi].b,24)); }
+    const whole=[]; for(let i=0;i<edgeCount(sh);i++) whole.push(...sampleEdge(sh,i,16)); add(t,whole);
+    const gi=lowestEdge(sh); add(t==='goal_left'?'goal_line_left':'goal_line_right', sampleEdge(sh,gi,24)); }
   const hs=shapes.find(s=>s.type==='halfway');
-  if(hs){ const g=edgesOf(hs)[0]; add('halfway', bezSample(g.a,g.ctrl,g.b,24)); }
+  if(hs) add('halfway', sampleEdge(hs,0,24));
 
   if(!lines.length){ alert('Nothing to save — draw at least the pitch.'); return; }
   const data={ image:img.dataset.name||'frame.jpg', size:[img.naturalWidth,img.naturalHeight],
@@ -245,7 +275,7 @@ document.getElementById('save').onclick=()=>{
 };
 document.getElementById('file').onchange=e=>{const f=e.target.files[0]; if(!f)return;
   const n=new Image(); n.dataset.name=f.name; n.onload=fit; n.src=URL.createObjectURL(f);
-  img=n; shapes=[]; pending=[]; setTool(null); };
+  img=n; shapes=[]; history=[]; pending=[]; setTool(null); };
 img.dataset.name='frame_85s.jpg'; img.onload=fit;
 img.onerror=()=>{info.textContent='load an equirect frame with the file picker';};
 img.src='frame_85s.jpg';
