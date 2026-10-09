@@ -127,10 +127,11 @@ spherical_tiling.py       detect_content_region, detect_span, build_grid, tile_e
                           hemisphere_mask, tile_pixel_to_equirect, merge_to_equirect (centre-NMS),
                           grass_roi_polygon, roi_filter, sidecar <video>.equirect.json
 virtual_camera.py         compute_camera_pose (smooth follow; tested)
-calib/calibrate.html      PEN TOOL: click 4 corners per shape (pitch, each goal); then
-                          click ANYWHERE to add a point (the nearest edge bends to it)
-                          and drag to shape each edge (Catmull-Rom, unlimited points);
-                          halfway optional + pitch size -> calib_equirect.json
+calib/calibrate.html      GUIDED PEN TOOL: bar tells you the corner order (pitch/goals:
+                          top-left → top-right → bottom-right → bottom-left); edge labels
+                          follow that order, so L/R map to the goal sides. Then click any
+                          point on a line and it bends to it immediately (Catmull-Rom,
+                          unlimited points); halfway optional + pitch size -> calib_equirect.json
 calib/spherical_calib.py  pose solver (6-DoF, exact line residuals), equirect_to_pitch /
                           pitch_to_equirect, calibration_from_traces (contract v1)
 calib/calibrate.py        CLI: trace file -> calibration.json
