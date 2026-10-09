@@ -255,4 +255,7 @@ auto-detects and de-stacks (takes one eye).
 `95ffe1a` FOV-20 falsified → `b4ee790` ball on tiles → `3fb4500` ball on full frame →
 `60a865d` ball recall → `fe97d6a` retrain decision →
 `42b017c` calib tool → `fceee7f` solver → `8808a95` goals →
-`769f929` pitch-size prompt → `e1f53f6` freehand pen.
+`769f929` pitch-size prompt → `e1f53f6` freehand pen →
+`2d862db` normalize + inventory → `bbf8c87` goal event (36.35 s) →
+`b4ed028` vspan param → `6231884` runnable pipeline → `3b0d2ce` session state →
+`5090e43` metric gate + pitch ROI.
