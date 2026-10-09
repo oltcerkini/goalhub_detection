@@ -25,45 +25,61 @@ _Last updated: 2026-10-09. Maintainer note: read this first when resuming work._
 #14 ball temporal redesign · #15 app upload→calibrate→process ·
 #16 validate all 6 clips · #17 virtual camera + MP4.
 
-## RESUME HERE  (updated 2026-10-09 — Task #10 verified, #11/#12 done)
+## RESUME HERE  (saved 2026-10-09, end of session)
 
-**Do this first:** read this file top-to-bottom, then continue at **Task #13**
-(goal validation) or **#14** (ball) — both want a real `calib/calibration.json`.
+**Do this first:** read this file top-to-bottom. Current blocker: the **real
+Barca trace does not calibrate yet** — the fitted pose is degenerate.
 
 | # | task | state |
 |---|---|---|
 | 9 | VR180 runnable pipeline | ✅ **DONE** — `vr180_pipeline.py` |
-| 10 | calibration one-command (traces → calibration.json) | ✅ **DONE** — `calib/calibrate.py`; self-test recovers the pose (median 0.436 m) |
+| 10 | calibration one-command (traces → calibration.json) | ✅ **DONE** — `calib/calibrate.py`; synthetic self-test recovers the pose |
 | 11 | metric projection + calibration gate | ✅ **DONE** — vspan honoured; above-horizon rays gated; invalid cal withholds metres |
-| 12 | ROI: drop off-pitch | ✅ **DONE** — calibration-derived pitch ROI (players + ball); grass fallback |
-| 13 | goal validation on 36.35 s clip | ⏸ needs a **real** `calib/calibration.json` + a ball track |
+| 12 | ROI: drop off-pitch | ✅ **DONE** — calibration-derived pitch ROI; grass fallback |
+| **CAL** | **real calibration (calib_equirect.json)** | ⚠ **BLOCKED** — traced, but fit is degenerate (see below) |
+| 13 | goal validation on 36.35 s clip | ⏸ needs a valid calibration |
 | 14 | ball temporal redesign (Track B) | ⏸ the main open risk |
-| 15 | app: upload → calibrate → process | ⏸ after a real calibration |
+| 15 | app: upload → calibrate → process | ⏸ |
 | 16 | validate across all 6 clips | ⏸ |
 | 17 | virtual camera + MP4 | ⏸ |
 
-**Where we are:** the whole chain runs end-to-end in one command —
+**Calibration session (2026-10-09).** The user traced `calib/calib_equirect.json`
+(frame_85s, Barca, 105×68). Visually the near touchline / both goal lines /
+halfway DO sit on the painted lines (verified with `out/trace_labels.jpg`). But
+the fitted pose is **degenerate** — the model pitch renders off-frame (1/4 corners
+in frame) — so `calibration_valid = false`. Root cause: ill-conditioned geometry
+(the far touchline sits at the horizon where ~1 px = metres; the camera is
+essentially ON the near touchline, so that line barely constrains the pose).
+
+**Solver state (commits `f275157`, `321f05e`):** off-frame trace points dropped;
+boundary lines are **segments** not infinite lines (infinite lines let points
+slide → degenerate poses); robust loss (soft_l1) + `quality.suspect_labels`;
+**geometric gate** `corners_in_frame >= 2` so a degenerate pose cannot pass on a
+low metre residual alone. `test_metric_roi.py` is self-contained and **ALL PASS**;
+synthetic self-tests **PASS**. The solver REFUSES rather than emit a bogus pose.
+
+**NEXT — ideas not yet tried (one was interrupted at shutdown):**
+1. Sweep the horizontal span in a corner fit — is span really 180 for this
+   content (3401×1586 = 2.14:1)? A span error bans any pose from fitting.
+2. Fit from the 4 pitch CORNERS as point correspondences (stronger than lines) —
+   currently ~30 px rms, so the corner clicks may be imprecise.
+3. Re-trace: **skip the far (top) touchline** (it is at the horizon, unusable);
+   land corners exactly on the pitch corners; do not click in the black margin.
+
+**Diagnostic artifacts (gitignored `out/`):** `calib_overlay.jpg`, `calib_final.jpg`,
+`trace_labels.jpg`, `calib_model_thick.jpg`, `near_touchline_crop.jpg`,
+`far_touchline_crop.jpg`. `calib/calib_equirect.json` = the user's real trace
+(untracked; keep it).
+
+**Where we are:** the whole chain runs in one command —
 `python vr180_pipeline.py --video "assets/180Videos/<clip>.mkv" [--calibration calib/calibration.json]`
 → normalize → FOV-60 player tiling → merge → ROI → ByteTrack → full-frame ball →
-tracking JSON (`mode: "equirect"`).
-
-**Metric + ROI (2026-10-09):** `make_metric` now honours the calibration's
-`vspan_deg`, gates rays that miss the ground (above the horizon → `pitch_m`
-omitted), withholds **all** metres when `calibration_valid = false`, and the ROI
-is now the **calibration-derived pitch rectangle** (players by ground contact,
-ball by its ground projection) with the grass hull kept as the fallback.
-Evidence: `test_metric_roi.py` ALL PASS (round-trip 0.000 m; horizon gate;
-on/off-pitch membership; invalid-cal withholding). Smoke run on the goal clip:
-no-cal 13 players/frame (gate off, no metres) vs synthetic-cal 3 (fictional pose
-→ aggressive ROI). **Real-footage ROI correctness still needs the user's trace.**
+tracking JSON (`mode: "equirect"`). `calib/calibration.json` on disk is the
+**synthetic** fixture (the real attempt was degenerate, not committed).
 
 **Known state / open items:**
-- **Only a synthetic calibration exists** (`calib/calibration.json`, source
-  "synthetic"). Real metres/ROI/goals need the user to trace
-  `calib/calibrate.html` → `calib/calib_equirect.json` → `python calib/calibrate.py`.
 - Ball is the weak link; #14 is the redesign. Detectors are **not** retrained.
-- The vertical-span assumption is unresolved (see §5b) — 180 assumed, `fit_vspan`
-  is off by default because it is ill-conditioned.
+- Vertical-span assumption unresolved (§5b): 180 assumed, `fit_vspan` off.
 - One clip is SBS stereo (Viewpt) — handled by `equirect.py`.
 
 **Environment / assets:** system Python 3.11 with ultralytics (TensorRT engine
