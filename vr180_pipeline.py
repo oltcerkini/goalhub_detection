@@ -53,25 +53,41 @@ def load_calibration(path):
     return cal
 
 
-def make_metric(cal, W, H):
-    """Return a function equirect_px -> (x_m, z_m) or None if no valid calib."""
+def make_metric(cal, W, H, roi_margin_m=3.0):
+    """Bind the calibration to the frame size.
+
+    Returns None when there is no calibration. Otherwise a mapping:
+        {valid, to_pitch(x,y)->[x_m,z_m]|None, on_pitch(x,y)->bool}
+    `to_pitch` returns None for pixels that do not meet the ground (above the
+    horizon) or when the calibration is not valid — so metric analytics are
+    withheld rather than silently wrong. `on_pitch` is the calibration-derived
+    ROI test (None when the calibration is not valid -> caller falls back).
+    """
     if not cal:
         return None
-    from spherical_calib import make_mappers
+    from spherical_calib import equirect_to_ground, pitch_contains
     pose = {"P": cal["camera_pose"]["position_m"], "rvec": cal["camera_pose"]["rotation_vector"]}
-    span = float(cal.get("span_deg", 180.0)); vspan = float(cal.get("vspan_deg", 180.0))
-    e2p, _ = make_mappers(pose, W, H, span)
-    valid = cal.get("quality", {}).get("valid", False)
+    span = float(cal.get("span_deg", 180.0))
+    vspan = float(cal.get("vspan_deg", 180.0))
+    dims = cal.get("pitch") or {}
+    valid = bool(cal.get("quality", {}).get("valid", False))
 
-    def f(x_eq, y_eq):
+    def to_pitch(x_eq, y_eq):
         if not valid:
             return None
-        x, z = e2p(x_eq, y_eq)
-        x, z = float(np.ravel(x)[0]), float(np.ravel(z)[0])
-        if not (np.isfinite(x) and np.isfinite(z)):
+        x, z, ok = equirect_to_ground(x_eq, y_eq, pose, W, H, span, vspan)
+        x, z, ok = float(np.ravel(x)[0]), float(np.ravel(z)[0]), bool(np.ravel(ok)[0])
+        if not (ok and np.isfinite(x) and np.isfinite(z)):
             return None
         return [round(x, 2), round(z, 2)]
-    return f
+
+    def on_pitch(x_eq, y_eq):
+        if not valid:
+            return None
+        m = pitch_contains(x_eq, y_eq, pose, W, H, span, dims, vspan, roi_margin_m)
+        return bool(np.ravel(m)[0])
+
+    return {"valid": valid, "to_pitch": to_pitch, "on_pitch": on_pitch}
 
 
 def run(video, calibration=None, span=180.0, fov=60.0, start_s=0.0, max_frames=None,
@@ -89,7 +105,7 @@ def run(video, calibration=None, span=180.0, fov=60.0, start_s=0.0, max_frames=N
     grid = build_grid(span, fov)
     frames, ball_trail = [], []
     W = H = None
-    e2p = None
+    metric = None
     roi_poly = None
     t0 = time.time()
     n = 0
@@ -102,8 +118,9 @@ def run(video, calibration=None, span=180.0, fov=60.0, start_s=0.0, max_frames=N
         content, meta = normalize_frame(raw, span=span)
         if W is None:
             H, W = content.shape[:2]
-            e2p = make_metric(cal, W, H)
-            if roi:
+            metric = make_metric(cal, W, H)
+            # grass-ROI only needed when there is no calibration-based pitch ROI
+            if roi and not (metric and metric["valid"]):
                 roi_poly = grass_roi_polygon(content)
         fidx = int(round(cap.get(cv2.CAP_PROP_POS_FRAMES)))
 
@@ -119,7 +136,12 @@ def run(video, calibration=None, span=180.0, fov=60.0, start_s=0.0, max_frames=N
                     dets.append({"tile_id": tid, "yaw": yaw, "pitch": pitch, "fov": f,
                                  "bbox": tuple(map(float, b)), "conf": float(s), "cls": 0})
         merged, _ = merge_to_equirect(dets, span, W, H, criterion="center")
-        if roi_poly is not None:
+        if roi and metric and metric["valid"]:
+            # calibration-derived ROI: keep only ground-contact points on the pitch
+            merged = [m for m in merged
+                      if metric["on_pitch"]((m["bbox"][0] + m["bbox"][2]) / 2.0,
+                                            m["bbox"][3])]
+        elif roi_poly is not None:
             merged, _ = roi_filter(merged, roi_poly)
 
         # track
@@ -137,8 +159,8 @@ def run(video, calibration=None, span=180.0, fov=60.0, start_s=0.0, max_frames=N
                     rec = {"id": tid, "bbox": [round(v, 1) for v in (x1, y1, x2, y2)],
                            "conf": round(float(tr.confidence[i]), 3),
                            "eq_ground": [round(gx, 1), round(gy, 1)]}
-                    if e2p:
-                        m = e2p(gx, gy)
+                    if metric:
+                        m = metric["to_pitch"](gx, gy)
                         if m:
                             rec["pitch_m"] = m
                     tracks.append(rec)
@@ -151,15 +173,20 @@ def run(video, calibration=None, span=180.0, fov=60.0, start_s=0.0, max_frames=N
                 j = int(r.boxes.conf.cpu().numpy().argmax())
                 if int(r.boxes.cls.cpu().numpy()[j]) == 0:
                     b = r.boxes.xyxy.cpu().numpy()[j]
-                    cx, cy = (b[0] + b[2]) / 2 - meta["region"][0], (b[1] + b[3]) / 2 - meta["region"][1]
+                    cx = (b[0] + b[2]) / 2 - meta["region"][0]
+                    cy = (b[1] + b[3]) / 2 - meta["region"][1]
                     conf = float(r.boxes.conf.cpu().numpy()[j])
-                    ball_rec = {"eq": [round(float(cx), 1), round(float(cy), 1)],
-                                "conf": round(conf, 3)}
-                    if e2p:
-                        m = e2p(cx, cy)
-                        if m:
-                            ball_rec["pitch_m"] = m
-                    ball_trail.append([fidx, round(float(cx), 1), round(float(cy), 1), round(conf, 3)])
+                    off_pitch = bool(metric and metric["valid"]
+                                     and metric["on_pitch"](cx, cy) is False)
+                    if not off_pitch:
+                        ball_rec = {"eq": [round(float(cx), 1), round(float(cy), 1)],
+                                    "conf": round(conf, 3)}
+                        if metric:
+                            m = metric["to_pitch"](cx, cy)
+                            if m:
+                                ball_rec["pitch_m"] = m
+                        ball_trail.append([fidx, round(float(cx), 1),
+                                           round(float(cy), 1), round(conf, 3)])
 
         frames.append({"frame": fidx, "t": round(fidx / fps, 2),
                        "players": tracks, "ball": ball_rec})

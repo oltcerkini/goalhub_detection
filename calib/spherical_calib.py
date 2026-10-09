@@ -334,13 +334,49 @@ def calibration_from_traces(src, span=None, verbose=True):
 
 
 # ---- Phase C public API --------------------------------------------------- #
-def make_mappers(pose, W, H, span=180.0):
-    """(equirect_to_pitch, pitch_to_equirect) bound to a pose."""
+def make_mappers(pose, W, H, span=180.0, vspan=180.0):
+    """(equirect_to_pitch, pitch_to_equirect) bound to a pose.
+
+    vspan MUST match the calibration's vspan_deg: the two maps have to agree on
+    the vertical span or every metre is scaled by the wrong factor."""
     def e2p(x_eq, y_eq):
-        return equirect_to_pitch(x_eq, y_eq, pose, W, H, span)
+        return equirect_to_pitch(x_eq, y_eq, pose, W, H, span, vspan)
     def p2e(x_m, z_m):
-        return pitch_to_equirect(x_m, z_m, pose, W, H, span)
+        return pitch_to_equirect(x_m, z_m, pose, W, H, span, vspan)
     return e2p, p2e
+
+
+def equirect_to_ground(x_eq, y_eq, pose, W, H, span, vspan=180.0):
+    """equirect pixel -> (x_m, z_m, valid) on the ground plane (y = 0).
+
+    valid is False when the ray does not meet the ground (at or above the
+    horizon). equirect_to_pitch clamps such rays to a far but finite point, so
+    callers that need a real ground coordinate must use this and check `valid`.
+    """
+    P = np.asarray(pose["P"], float)
+    R = rotmat(pose["rvec"])
+    d = equirect_dir(x_eq, y_eq, W, H, span, vspan) @ R.T
+    dy = d[..., 1]
+    valid = dy < -1e-6
+    t = -P[1] / np.where(valid, dy, -1.0)
+    g = P + t[..., None] * d
+    return g[..., 0], g[..., 2], valid
+
+
+def pitch_contains(x_eq, y_eq, pose, W, H, span, dims=None, vspan=180.0,
+                   margin_m=0.0):
+    """Is this equirect pixel's ground projection inside the pitch rectangle?
+
+    Above-horizon / off-ray pixels are False, so this doubles as a metric
+    validity gate. `margin_m` grows the rectangle (players standing just off the
+    touchline still count as on-pitch).
+    """
+    d = dict(DEFAULT_PITCH)
+    d.update(dims or {})
+    hl = d["length"] / 2.0 + margin_m
+    hw = d["width"] / 2.0 + margin_m
+    x_m, z_m, ok = equirect_to_ground(x_eq, y_eq, pose, W, H, span, vspan)
+    return ok & (np.abs(x_m) <= hl) & (np.abs(z_m) <= hw)
 
 
 # ---- Phase B synthetic self-test ------------------------------------------ #

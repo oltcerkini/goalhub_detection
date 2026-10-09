@@ -2,6 +2,7 @@
   "version": 1,
   "projection": "equirect",
   "span_deg": 180.0,
+  "vspan_deg": 180.0,
   "image_size": [
     3401,
     1586

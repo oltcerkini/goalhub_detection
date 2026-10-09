@@ -1,6 +1,6 @@
 # VR180 Pipeline — Status, Roadmap & Context
 
-_Last updated: 2026-10-08. Maintainer note: read this first when resuming work._
+_Last updated: 2026-10-09. Maintainer note: read this first when resuming work._
 
 ## 0. How to work on this project (operating instructions)
 
@@ -25,41 +25,50 @@ _Last updated: 2026-10-08. Maintainer note: read this first when resuming work._
 #14 ball temporal redesign · #15 app upload→calibrate→process ·
 #16 validate all 6 clips · #17 virtual camera + MP4.
 
-## RESUME HERE  (saved 2026-10-08, end of session)
+## RESUME HERE  (updated 2026-10-09 — Task #10 verified, #11/#12 done)
 
-**Do this first:** read this file top-to-bottom, then continue at **Task #10**.
+**Do this first:** read this file top-to-bottom, then continue at **Task #13**
+(goal validation) or **#14** (ball) — both want a real `calib/calibration.json`.
 
 | # | task | state |
 |---|---|---|
 | 9 | VR180 runnable pipeline | ✅ **DONE** — `vr180_pipeline.py` |
-| 10 | calibration one-command (traces → calibration.json) | ⏭ **NEXT** |
-| 11 | metric projection + calibration gate | ◐ partly in `vr180_pipeline` (ground-contact + gate); finish |
-| 12 | ROI: drop off-pitch | ◐ grass ROI wired in pipeline; needs calibration-based ROI |
-| 13 | goal validation on 36.35 s clip | ⏸ needs #10 + a ball track |
+| 10 | calibration one-command (traces → calibration.json) | ✅ **DONE** — `calib/calibrate.py`; self-test recovers the pose (median 0.436 m) |
+| 11 | metric projection + calibration gate | ✅ **DONE** — vspan honoured; above-horizon rays gated; invalid cal withholds metres |
+| 12 | ROI: drop off-pitch | ✅ **DONE** — calibration-derived pitch ROI (players + ball); grass fallback |
+| 13 | goal validation on 36.35 s clip | ⏸ needs a **real** `calib/calibration.json` + a ball track |
 | 14 | ball temporal redesign (Track B) | ⏸ the main open risk |
-| 15 | app: upload → calibrate → process | ⏸ after #10 |
+| 15 | app: upload → calibrate → process | ⏸ after a real calibration |
 | 16 | validate across all 6 clips | ⏸ |
 | 17 | virtual camera + MP4 | ⏸ |
 
-**Where we are:** the whole chain now runs end-to-end in one command —
+**Where we are:** the whole chain runs end-to-end in one command —
 `python vr180_pipeline.py --video "assets/180Videos/<clip>.mkv" [--calibration calib/calibration.json]`
 → normalize → FOV-60 player tiling → merge → ROI → ByteTrack → full-frame ball →
-tracking JSON (`mode: "equirect"`). Smoke test on the goal clip (35 s, 20 frames):
-15.6 players/frame, 17 unique ids, 20 ball candidates, 47 s. Metric fields are
-correctly withheld while `calibration_valid = false`.
+tracking JSON (`mode: "equirect"`).
+
+**Metric + ROI (2026-10-09):** `make_metric` now honours the calibration's
+`vspan_deg`, gates rays that miss the ground (above the horizon → `pitch_m`
+omitted), withholds **all** metres when `calibration_valid = false`, and the ROI
+is now the **calibration-derived pitch rectangle** (players by ground contact,
+ball by its ground projection) with the grass hull kept as the fallback.
+Evidence: `test_metric_roi.py` ALL PASS (round-trip 0.000 m; horizon gate;
+on/off-pitch membership; invalid-cal withholding). Smoke run on the goal clip:
+no-cal 13 players/frame (gate off, no metres) vs synthetic-cal 3 (fictional pose
+→ aggressive ROI). **Real-footage ROI correctness still needs the user's trace.**
 
 **Known state / open items:**
-- No calibration on disk yet → metric metres and goals are not active. That is
-  what Task #10 unblocks.
-- Ball is the weak link (low confidence); #14 is the redesign. Detectors are
-  **not** being retrained.
+- **Only a synthetic calibration exists** (`calib/calibration.json`, source
+  "synthetic"). Real metres/ROI/goals need the user to trace
+  `calib/calibrate.html` → `calib/calib_equirect.json` → `python calib/calibrate.py`.
+- Ball is the weak link; #14 is the redesign. Detectors are **not** retrained.
 - The vertical-span assumption is unresolved (see §5b) — 180 assumed, `fit_vspan`
   is off by default because it is ill-conditioned.
 - One clip is SBS stereo (Viewpt) — handled by `equirect.py`.
 
-**Environment / assets:** Python venv with ultralytics (TensorRT engine loads),
-OpenCV, scipy, supervision. Six clips in `assets/180Videos/`. Models at repo root
-(`yolo26l.pt`, `ball_detector_yolo26m.engine`).
+**Environment / assets:** system Python 3.11 with ultralytics (TensorRT engine
+loads), OpenCV, scipy, supervision. Six clips in `assets/180Videos/`. Models at
+repo root (`yolo26l.pt`, `ball_detector_yolo26m.engine`).
 
 ## 1. Product goal (the user's words)
 
@@ -87,6 +96,7 @@ Target user: an amateur club coach — one fixed 180° camera pitch-side, no ope
 | Player detection | same model `yolo26l.pt` @1280; tiled path; ByteTrack on equirect coords = 0.90× track ratio |
 | Calibration solver | pose recovered from synthetic traces: 0.000 m clean, 0.19–0.31 % @1–2 px click noise |
 | Metric mapping | round-trip 0.0000 m; end-to-end < 0.52 m @2 px noise |
+| Metric gate + ROI | vspan honoured; above-horizon rays → `pitch_m` omitted; `calibration_valid=false` withholds metres; ROI = calibration-derived pitch rectangle (players by ground contact, ball by ground projection), grass hull fallback |
 | Goal geometry | synthetic PASS (roll-in detected; wide / over-bar / far-away rejected) |
 
 ### Open / blocked
@@ -95,7 +105,7 @@ Target user: an amateur club coach — one fixed 180° camera pitch-side, no ope
 | **Ball detection on VR180** | Finds real balls on the **full frame** (visually confirmed) but low confidence (median 0.11). Validator re-tune (Test A) and player-proximity prior (Test B) **both failed** — best 42 % coverage / 28 % multi-detection. **This is the main open problem.** |
 | Real calibration | Needs the user to trace `calib/calib_equirect.json`. Tool exists. |
 | Goal detection on real footage | Needs calibration + a clip with a confirmed goal. |
-| ROI / off-pitch filtering | Not wired into the run; both detection paths fire on spectators/bench. Calibration gives the pitch region. |
+| ROI / off-pitch filtering | **Wired** (2026-10-09): calibration-derived pitch rectangle + grass fallback. Correctness on real footage awaits a real `calib/calibration.json`. |
 | Virtual camera renderer | Only the pose controller (`virtual_camera.py`) exists. No video output. |
 | Integration | `--input-mode equirect` in `process.py` **not started**. |
 | Events/analytics beyond goals | Not built for equirect. |
@@ -231,6 +241,13 @@ auto-detects and de-stacks (takes one eye).
 - **Calibration = spherical ground-plane**, not homography.
 - **No retraining** for players; ball retrain only if the temporal redesign fails.
 - Validity uses the **median** residual (RMS is inflated by near-horizon traces).
+- **Metric gate = below-horizon ray AND `calibration_valid`** — an above-horizon
+  ray has no ground intersection, so `pitch_m` is omitted (never clamped garbage).
+- **vspan is a first-class projection parameter** — `make_mappers(..., vspan=)` /
+  `equirect_to_ground(..., vspan=)`; the pipeline feeds it the calibration's
+  `vspan_deg`. Mismatching it scales every metre silently.
+- **ROI = calibration-derived pitch rectangle** (ground projection; players by
+  bbox ground contact, ball by centre), grass hull kept only as the fallback.
 
 ## 8. Commit trail (chronological)
 `bed22d8` flat fixes → `5fd12cc`/`09d1518` Projection Phase 1 →
