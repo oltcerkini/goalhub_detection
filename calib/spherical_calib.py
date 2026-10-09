@@ -50,11 +50,11 @@ def pitch_geometry(dims=None):
     hl, hw = d["length"] / 2, d["width"] / 2
     pd, ph = d["penalty_depth"], d["penalty_half"]
     return {
-        "touchline_near": ("line", (-hl, hw), (hl, hw)),
-        "touchline_far": ("line", (-hl, -hw), (hl, -hw)),
-        "goal_line_left": ("line", (-hl, -hw), (-hl, hw)),
-        "goal_line_right": ("line", (hl, -hw), (hl, hw)),
-        "halfway": ("line", (0, -hw), (0, hw)),
+        "touchline_near": ("segment", (-hl, hw), (hl, hw)),
+        "touchline_far": ("segment", (-hl, -hw), (hl, -hw)),
+        "goal_line_left": ("segment", (-hl, -hw), (-hl, hw)),
+        "goal_line_right": ("segment", (hl, -hw), (hl, hw)),
+        "halfway": ("segment", (0, -hw), (0, hw)),
         "penalty_box_left": ("poly", [(-hl, -ph), (-hl + pd, -ph), (-hl + pd, ph), (-hl, ph)]),
         "penalty_box_right": ("poly", [(hl, -ph), (hl - pd, -ph), (hl - pd, ph), (hl, ph)]),
         "centre_circle": ("circle", (0.0, 0.0), d["circle_r"]),
@@ -68,25 +68,44 @@ def _line_dist(g, a, b):
     return np.abs((g - a) @ n)
 
 
+def _seg_dist(g, a, b):
+    """Clamped point-to-SEGMENT distance. Unlike the infinite line, the endpoints
+    matter — without this the traced points can slide along the line and the pose
+    is under-constrained (a degenerate fit that does not reproduce the image)."""
+    a, b = np.asarray(a, float), np.asarray(b, float)
+    g = np.asarray(g, float)
+    single = g.ndim == 1
+    gg = g[None, :] if single else g
+    ab = b - a
+    t = np.clip(((gg - a) @ ab) / (ab @ ab), 0, 1)
+    d = np.linalg.norm(gg - (a + t[:, None] * ab), axis=1)
+    return float(d[0]) if single else d
+
+
 def _poly_dist(g, pts):
     pts = np.asarray(pts, float)
+    g = np.asarray(g, float)
+    single = g.ndim == 1
+    gg = g[None, :] if single else g
     best = None
     for i in range(len(pts)):
         a, b = pts[i], pts[(i + 1) % len(pts)]
         ab = b - a
-        t = np.clip(((g - a) @ ab) / (ab @ ab), 0, 1)
-        dd = np.linalg.norm(g - (a + t[:, None] * ab), axis=1)
+        t = np.clip(((gg - a) @ ab) / (ab @ ab), 0, 1)
+        dd = np.linalg.norm(gg - (a + t[:, None] * ab), axis=1)
         best = dd if best is None else np.minimum(best, dd)
-    return best
+    return float(best[0]) if single else best
 
 
 def label_residual(g, spec):
     """g: (N,2) ground points (x,z). -> (N,) min distance in metres to the line."""
     if spec[0] == "line":
         return _line_dist(g, spec[1], spec[2])
+    if spec[0] == "segment":
+        return _seg_dist(g, spec[1], spec[2])
     if spec[0] == "circle":
         c, r = np.asarray(spec[1], float), spec[2]
-        return np.abs(np.linalg.norm(g - c, axis=1) - r)
+        return np.abs(np.linalg.norm(np.asarray(g, float) - c, axis=-1) - r)
     return _poly_dist(g, spec[1])
 
 
@@ -97,6 +116,11 @@ def nearest_on(g, spec):
         a, b = np.asarray(spec[1], float), np.asarray(spec[2], float)
         d = b - a
         return a + np.dot(g - a, d) / np.dot(d, d) * d
+    if spec[0] == "segment":
+        a, b = np.asarray(spec[1], float), np.asarray(spec[2], float)
+        d = b - a
+        t = np.clip(np.dot(g - a, d) / np.dot(d, d), 0, 1)
+        return a + t * d
     if spec[0] == "circle":
         c, r = np.asarray(spec[1], float), spec[2]
         v = g - c
@@ -202,13 +226,16 @@ def _rms_px(traces, pose, geom, W, H, span, vspan=180.0):
 
 
 def solve_pose(traces, W, H, span=180.0, geom=None, seed_inits=None, max_nfev=400,
-               fit_vspan=False, vspan0=180.0):
+               fit_vspan=False, vspan0=180.0, loss="linear", f_scale=1.0):
     """Fit camera pose (and optionally the vertical span) so traced equirect
     curves land on the known pitch lines.
 
     fit_vspan=True adds the pitch scope across the image height as a 7th
     parameter, so clips whose content aspect is not ~1:1 do not need the
     caller to know their vertical FOV.
+
+    loss/f_scale: scipy robust loss ("soft_l1"/"huber"). A mistraced line near
+    the horizon can be 100x off; a robust loss keeps it from swamping the fit.
     """
     geom = geom or pitch_geometry()
     groups = _group([(float(x), float(y), l) for x, y, l in traces if l in geom])
@@ -249,10 +276,11 @@ def solve_pose(traces, W, H, span=180.0, geom=None, seed_inits=None, max_nfev=40
             x0 = x0 + [vspan0]
         try:
             r = least_squares(resid, np.clip(x0, lo, hi), bounds=(lo, hi), method="trf",
-                              max_nfev=max_nfev, xtol=1e-12, ftol=1e-12)
+                              max_nfev=max_nfev, xtol=1e-12, ftol=1e-12,
+                              loss=loss, f_scale=f_scale)
         except Exception:
             continue
-        c = float(np.sum(r.fun ** 2))
+        c = float(r.cost)                 # robust cost when loss != linear
         if best is None or c < best[0]:
             best = (c, r.x.copy())
     if best is None:
@@ -260,10 +288,11 @@ def solve_pose(traces, W, H, span=180.0, geom=None, seed_inits=None, max_nfev=40
     cost, p = best
     pose, vspan = unpack(p)
     res = resid(p)
+    sse = float(np.sum(res ** 2))
     n = sum(len(v[0]) for v in groups.values())
     return {"P": list(p[:3]), "rvec": list(p[3:6]), "R": rotmat(p[3:6]).tolist(),
             "vspan": float(vspan), "cost": cost,
-            "rms_m": float(np.sqrt(cost / max(n, 1))), "med_m": float(np.median(res)),
+            "rms_m": float(np.sqrt(sse / max(n, 1))), "med_m": float(np.median(res)),
             "rms_px": _rms_px(traces, pose, geom, W, H, span, vspan),
             "n": int(n), "labels": sorted(groups)}
 
@@ -313,59 +342,74 @@ def calibration_from_traces(src, span=None, verbose=True):
     fit_vs = bool(data.get("fit_vspan", False))
     vspan0 = float(data.get("vspan_deg", 180.0))
 
-    def _solve(ts):
-        return solve_pose(ts, W, H, span, geom=geom, fit_vspan=fit_vs, vspan0=vspan0)
+    # robust loss: a mistraced near-horizon line (~1 px = metres) can be 100x off
+    # and would otherwise swamp the least-squares fit.
+    sol = solve_pose(traces, W, H, span, geom=geom, fit_vspan=fit_vs,
+                     vspan0=vspan0, loss="soft_l1", f_scale=1.0)
+    pose = {"P": np.array(sol["P"]), "rvec": np.array(sol["rvec"])}
+    vspan_used = float(sol["vspan"])
 
-    sol = _solve(traces)
+    # quality / diagnostics from the line traces under the chosen pose
+    per = {}
+    allres = []
+    for x, y, l in traces:
+        gx, gz = equirect_to_pitch(x, y, pose, W, H, span, vspan_used)
+        g = np.array([float(np.ravel(gx)[0]), float(np.ravel(gz)[0])])
+        r = min(float(np.ravel(label_residual(g, geom[l]))[0]), 80.0)
+        per.setdefault(l, []).append(r)
+        allres.append(r)
+    allres = np.array(allres)
+    med_m = float(np.median(allres))
+    rms_m = float(np.sqrt(np.mean(allres ** 2)))
+    rms_px = _rms_px(traces, pose, geom, W, H, span, vspan_used)
+    meds = {l: float(np.median(v)) for l, v in per.items()}
+    overall = float(np.median(list(meds.values())))
+    suspect = sorted(l for l, m in meds.items() if m > max(4.0, 8.0 * overall))
+    if verbose and suspect:
+        print(f"  WARNING suspect line(s) {suspect} "
+              f"(median {[round(meds[l], 1) for l in suspect]} m vs {overall:.2f} m overall) "
+              f"- consider re-tracing")
 
-    # Robustness: one mistraced line must not invalidate the whole calibration.
-    # Drop a label whose median residual is far worse than the rest, then re-solve.
-    dropped_labels = []
-    for _ in range(3):
-        if len({l for _, _, l in traces}) <= 3:
-            break
-        pose = {"P": np.array(sol["P"]), "rvec": np.array(sol["rvec"])}
-        per = {}
-        for x, y, l in traces:
-            gx, gz = equirect_to_pitch(x, y, pose, W, H, span, sol["vspan"])
-            g = np.array([float(np.ravel(gx)[0]), float(np.ravel(gz)[0])])
-            per.setdefault(l, []).append(float(np.ravel(label_residual(g, geom[l]))[0]))
-        meds = {l: float(np.median(v)) for l, v in per.items()}
-        bad = [l for l, m in meds.items()
-               if m > max(4.0, 6.0 * float(np.median(list(meds.values()))))]
-        if not bad:
-            break
-        dropped_labels += bad
-        traces = [t for t in traces if t[2] not in bad]
-        used = {l: n for l, n in used.items() if l not in bad}
-        if verbose:
-            print(f"  dropped line(s) {bad} (median {max(meds[b] for b in bad):.1f} m) -> re-solving")
-        sol = _solve(traces)
-    # validity on the MEDIAN residual: the RMS is dominated by near-horizon traces
-    # where a pixel maps to metres of ground, which says nothing about fit quality.
-    valid = bool(sol["med_m"] < RMS_VALID_M and sol["n"] >= 12)
+    # GEOMETRIC sanity gate: a correct pose renders the pitch inside the frame. A
+    # degenerate fit (traced points sliding along a near-infinite line) barely
+    # lowers the metre residual while putting the pitch somewhere off-screen, so
+    # the metre median alone can look fine on a useless pose. Require the pitch
+    # corners to project in (or just outside) the frame.
+    d = dict(DEFAULT_PITCH); d.update(dims)
+    hl, hw = d["length"] / 2.0, d["width"] / 2.0
+    in_frame = 0
+    for xm, zm in [(-hl, hw), (hl, hw), (hl, -hw), (-hl, -hw)]:
+        ex, ey = pitch_to_equirect(xm, zm, pose, W, H, span, vspan_used)
+        ex, ey = float(np.ravel(ex)[0]), float(np.ravel(ey)[0])
+        if -0.06 * W <= ex < 1.06 * W and -0.06 * H <= ey < 1.06 * H:
+            in_frame += 1
+    if verbose and in_frame < 2:
+        print(f"  WARNING fitted pitch does not render in frame ({in_frame}/4 corners) "
+              f"-> pose is degenerate")
+    valid = bool(med_m < RMS_VALID_M and len(allres) >= 12 and in_frame >= 2)
     out = {
         "version": CALIB_VERSION,
         "projection": "equirect",
         "span_deg": span,
-        "vspan_deg": sol["vspan"],
+        "vspan_deg": vspan_used,
         "image_size": [int(W), int(H)],
         "content_region": data.get("crop"),
         "source_image": data.get("image"),
         "pitch": {**DEFAULT_PITCH, **dims},
-        "camera_pose": {"position_m": sol["P"], "rotation_vector": sol["rvec"],
-                        "R": sol["R"]},
+        "camera_pose": {"position_m": [float(v) for v in pose["P"]],
+                        "rotation_vector": [float(v) for v in pose["rvec"]],
+                        "R": rotmat(pose["rvec"]).tolist()},
         "traced_features": {"labels": sorted(used), "points_per_label": used},
-        "quality": {"med_m": sol["med_m"], "rms_m": sol["rms_m"], "rms_px": sol["rms_px"],
-                    "n_points": sol["n"], "valid": valid,
+        "quality": {"med_m": med_m, "rms_m": rms_m, "rms_px": rms_px,
+                    "n_points": int(len(allres)), "valid": valid,
                     "valid_threshold_m": RMS_VALID_M,
-                    "dropped_labels": dropped_labels},
+                    "suspect_labels": suspect, "corners_in_frame": in_frame},
     }
     if verbose:
-        print(f"calibration: {sol['n']} pts from {sorted(used)}")
-        print(f"  pose P={np.round(sol['P'], 2)}  vspan={sol['vspan']:.1f} deg  "
-              f"median {sol['med_m']:.3f} m / rms {sol['rms_m']:.3f} m / "
-              f"{sol['rms_px']:.2f} px  -> calibration_valid={valid}")
+        print(f"calibration: {len(allres)} pts from {sorted(used)}")
+        print(f"  pose P={np.round(pose['P'], 2)}  vspan={vspan_used:.1f} deg  "
+              f"median {med_m:.3f} m / rms {rms_m:.3f} m / "
+              f"{rms_px:.2f} px  -> calibration_valid={valid}")
     return out
 
 
@@ -480,7 +524,7 @@ def _median_px(traces, pose, geom, W, H, span, vspan=180.0):
 
 
 def _sample_spec(spec):
-    if spec[0] == "line":
+    if spec[0] in ("line", "segment"):
         a, b = np.asarray(spec[1], float), np.asarray(spec[2], float)
         t = np.linspace(0, 1, 80)[:, None]
         return a + t * (b - a)

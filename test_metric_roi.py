@@ -8,14 +8,15 @@ Verifies the vr180_pipeline wiring against the synthetic calibration:
   (4) pitch membership keeps on-pitch points and drops off-pitch ones.
 """
 import json
-from pathlib import Path
-
 import numpy as np
 
 from vr180_pipeline import make_metric
-from calib.spherical_calib import make_mappers, equirect_to_ground, pitch_to_equirect, DEFAULT_PITCH
+from calib.spherical_calib import (make_mappers, equirect_to_ground, pitch_to_equirect,
+                                   DEFAULT_PITCH, calibration_from_traces)
 
-CAL = json.loads(Path("calib/calibration.json").read_text())
+# self-contained: build the calibration from the synthetic trace, so the test does
+# not depend on whichever calibration.json is currently on disk.
+CAL = calibration_from_traces("calib/calib_equirect_synthetic.json", verbose=False)
 W, H = CAL["image_size"]
 SPAN, VSPAN = float(CAL["span_deg"]), float(CAL["vspan_deg"])
 POSE = {"P": np.array(CAL["camera_pose"]["position_m"]),
@@ -49,17 +50,21 @@ metric90 = make_metric(cal90, W, H)
 check("make_metric honours vspan_deg",
       metric["to_pitch"](W / 2, H * 0.75) != metric90["to_pitch"](W / 2, H * 0.75))
 
-# (2) round-trip under the pose ---------------------------------------------
+# (2) round-trip under the pose (only points that fall inside THIS frame) -----
 print("round-trip (project a known pitch point, map it back):")
-for name, (xm, zm) in {"centre spot": (0, 0), "on-pitch": (20, 10),
-                       "pen-box corner": (36, 20.16), "behind far touchline": (0, 50)}.items():
+cands = [(xm, zm) for xm in range(-50, 53, 10) for zm in range(-30, 33, 10)]
+tested = 0
+for (xm, zm) in cands:
     ex, ey = pitch_to_equirect(xm, zm, POSE, W, H, SPAN, VSPAN)
     ex, ey = float(np.ravel(ex)[0]), float(np.ravel(ey)[0])
-    in_img = 0 <= ex < W and 0 <= ey < H
-    got = metric["to_pitch"](ex, ey) if in_img else None
+    if not (0 <= ex < W and 0 <= ey < H):
+        continue
+    got = metric["to_pitch"](ex, ey)
     err = float(np.hypot(got[0] - xm, got[1] - zm)) if got else float("nan")
-    check(f"round-trip {name}", in_img and got is not None and err < 0.05,
+    tested += 1
+    check(f"round-trip ({xm},{zm})", got is not None and err < 0.05,
           f"(eq {ex:.0f},{ey:.0f} -> {got} err {err:.3f} m)")
+check("round-trip covered several in-frame points", tested >= 3, f"({tested} tested)")
 
 # (3) horizon gate ----------------------------------------------------------
 col = [metric["to_pitch"](W / 2, y) for y in range(0, H, 4)]

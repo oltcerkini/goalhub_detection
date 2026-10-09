@@ -254,11 +254,18 @@ auto-detects and de-stacks (takes one eye).
   `vspan_deg`. Mismatching it scales every metre silently.
 - **ROI = calibration-derived pitch rectangle** (ground projection; players by
   bbox ground contact, ball by centre), grass hull kept only as the fallback.
-- **Calibration trace robustness (2026-10-09):** points outside the image frame
-  are dropped; a whole labelled line whose median residual is far worse than the
-  rest is auto-dropped and reported in `quality.dropped_labels`. Near-horizon
-  lines are the usual culprit — ~1 px ≈ metres there, so a small mis-trace
-  explodes. The far touchline sits near the horizon in the Barca clip.
+- **Calibration robustness (2026-10-09, real trace):** off-frame trace points
+  dropped; boundary lines are modeled as **segments** not infinite lines (infinite
+  lines let points slide → degenerate poses); a **robust loss** (soft_l1) down-weights
+  a mistraced near-horizon line and reports it in `quality.suspect_labels`; and a
+  **geometric gate** requires the fitted pitch to render in-frame (`corners_in_frame
+  >= 2`) so a degenerate fit cannot pass on a low metre residual alone.
+- **Real Barca trace (frame_85s) does NOT calibrate yet.** The near touchline/goal
+  lines/halfway trace correctly, but the fitted pose collapses to a degenerate one
+  (pitch off-frame, 1/4 corners). Causes: the far touchline sits at the horizon
+  (~1 px = metres) and the camera is essentially on the near touchline, so the
+  metre residual is ill-conditioned. Solver now flags this (valid=false) rather
+  than emitting a bogus pose. Needs a better trace or a point-correspondence fit.
 - **Calibration input = 4 corners per shape + bendable edges** (pen tool), NOT
   freehand tracing. Only the pitch outline is required; the halfway line is an
   optional refinement; penalty boxes and the centre circle were dropped. Edge
