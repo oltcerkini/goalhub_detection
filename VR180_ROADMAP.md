@@ -1,6 +1,6 @@
 # VR180 Pipeline — Status, Roadmap & Context
 
-_Last updated: 2026-10-09. Maintainer note: read this first when resuming work._
+_Last updated: 2026-11-24. Maintainer note: read this first when resuming work._
 
 ## 0. How to work on this project (operating instructions)
 
@@ -36,12 +36,61 @@ Barca trace does not calibrate yet** — the fitted pose is degenerate.
 | 10 | calibration one-command (traces → calibration.json) | ✅ **DONE** — `calib/calibrate.py`; synthetic self-test recovers the pose |
 | 11 | metric projection + calibration gate | ✅ **DONE** — vspan honoured; above-horizon rays gated; invalid cal withholds metres |
 | 12 | ROI: drop off-pitch | ✅ **DONE** — calibration-derived pitch ROI; grass fallback |
-| **CAL** | **real calibration (calib_equirect.json)** | ⚠ **BLOCKED** — traced, but fit is degenerate (see below) |
-| 13 | goal validation on 36.35 s clip | ⏸ needs a valid calibration |
+| **CAL** | **real calibration (calib_equirect.json)** | ⚠ **APPROXIMATE, accepted 2026-10-12** — parity bug fixed → `valid=true` (med 0.82 m) but the trace is imperfect (near touchline inside the paint) so expect metre-level error; `calib/calibration.json` shipped |
+| 13 | goal validation on 36.35 s clip | ⚠ **tested 2026-10-12 — 0 goals, BLOCKED on the ball.** With the approximate calibration, the ball trail (`out/track_goal2.json`, 35–39.6 s) sits at ground x∈[-0.5,10.6] z∈[24,34] for all 110 frames — never within 3 m of a goal line (x=±52.5), and dominantly at a few REPEATED pixels (eq(464,1021) ×7, eq(2979,1445) ×6 …) = static false positives. The goal logic can't fire because the ball isn't tracked. Fix #14 first. |
 | 14 | ball temporal redesign (Track B) | ⏸ the main open risk |
-| 15 | app: upload → calibrate → process | ⏸ |
+| 15 | app: upload → calibrate → process | ✅ **DONE 2026-10-12** — `app180.py` (port 8081) + `app/templates/index180.html`: upload 180 video → trace in the embedded `calibrate.html` → calibrate → **detect players → annotated MP4** (`/api/video/{task_id}`; boxes + track id + pitch position, h264). Verified end-to-end over HTTP on a 30 s clip: 30 frames, 21-22 players, 1.25 s mp4. Drone `app.py` untouched. |
 | 16 | validate across all 6 clips | ⏸ |
 | 17 | virtual camera + MP4 | ⏸ |
+
+**Session 2026-11-24 — calibration is now a true Bézier pen tool.**
+- `calib/calibrate.html`: click = corner (straight); click-drag = curve **only the
+  outgoing edge**; auto-closes at the required count (pitch 4, halfway 2, centre circle 4).
+  Afterwards **drag any line to bend it in place — no mode switch, no new point**.
+  Anchors move the point; a handle drag bends only that side; **Alt-drag mirrors** it.
+- **Separate goal shapes removed** — the pitch outline already yields both goal lines
+  (`goal_line_left/right` along the pitch ends). Tool is now just **Pitch (required) ·
+  Halfway · Centre circle**, plus a single **Calibrate** button. Interface simplified.
+- Verified with a Node stub harness (20 checks: cubic sampling, out-only pen drag, direct
+  drag-to-bend with no added anchor, auto-close, chip add/remove, trace schema) **and in
+  real headless Chrome** via CDP mouse events. The first two-mode UI failed the user in
+  practice — dragging a line in the default mode did nothing. The Chrome test reproduced
+  it, so the mode buttons were removed: drag-to-bend is the default interaction.
+  Solver self-test still 0.312 m (`valid=true`).
+- `app180.py` serves `/` and `/calib/tool` with `Cache-Control: no-store`; the app
+  cache-busts the iframe (`v=Date.now()`), so a reload/re-upload gets the current tool.
+- `app/templates/index180.html`: step-2 copy updated (drag any line to bend); `valid=false`
+  shows a warning instead of a green success line.
+
+**Session 2026-11-24 — player precision/recall inside the pitch.**
+- **The fitted-pose ROI was wrong on the Barca clip.** Rendering `pitch_to_equirect`
+  from `calibration.json` put the pitch polygon far outside the paint, so the pose ROI
+  kept every foreground spectator (0/26 dropped). The **raw trace** is aligned with the
+  paint, so the ROI now comes from the traced outline, not the solved pose.
+- New `spherical_tiling.pitch_polygon_from_trace` + `trace_roi_filter`: longest line per
+  pitch label (legacy goal-shape duplicates ignored), trace→content scaling, angle-sort
+  polygon; ground contact = bbox bottom-centre; outward margin = 0.20 × bbox height
+  (near-player overhang). `vr180_pipeline --trace` (also auto-loads
+  `<calibration>_trace.json`); `app180` passes it. `test_trace_roi.py` ALL PASS.
+- **Measured (Barca 30 s clip, frames 0/240/480):** tiled@0.10 merged 26/31/27; trace ROI
+  kept 19/20/17, dropping the bottom spectators and far-sideline people. Lowering conf to
+  0.07 added only an 11×4 noise box → **PLAYER_CONF stays 0.10**.
+- **The tracker was the recall bottleneck (three separate loss mechanisms):**
+  (1) ByteTrack only starts tracks above ~0.35, so 1–4 on-pitch players/frame
+  (conf 0.10–0.25) were never tracked; `PlayerTracker` gained an optional
+  `track_activation_threshold` (default **0.25 — flat path unchanged**), VR180 uses 0.0.
+  (2) supervision's wrapper re-matches detections to tracks at a hard-coded **IoU 0.5**
+  and drops the rest; VR180 uses `strict_iou=False`.
+  (3) ByteTrack keeps a new track *unconfirmed* for one frame; `_update_tracks` now emits
+  the current frame's unconfirmed tracks too.
+  Plus a player-shape filter (h≥8 px, aspect 0.6–8) and `--track-min-hits 1`.
+  16-frame A/B: old [16,16,18,18,19,17,17,17,17,16,17,16,17,16,16,14] / 19 IDs;
+  new [20,19,20,21,21,18,20,19,19,19,19,17,17,18,19,17] / 21 IDs. No ID explosion.
+- **Full-frame union tested and REJECTED:** it added ~9–10 boxes/frame, but they were
+  subs/coaches outside the far touchline (box bottoms crossed the line within the margin),
+  not missing players. Tiled@0.10 already finds the on-pitch players.
+- Flat pipeline untouched (defaults preserved); **no model retrain.** Rendered overlays in
+  gitignored `out/roi_*.jpg`; `test_trace_roi.py` PASS; app `/api/process` uses `--trace`.
 
 **Calibration session (2026-10-09).** The user traced `calib/calib_equirect.json`
 (frame_85s, Barca, 105×68). Visually the near touchline / both goal lines /
@@ -58,13 +107,70 @@ slide → degenerate poses); robust loss (soft_l1) + `quality.suspect_labels`;
 low metre residual alone. `test_metric_roi.py` is self-contained and **ALL PASS**;
 synthetic self-tests **PASS**. The solver REFUSES rather than emit a bogus pose.
 
-**NEXT — ideas not yet tried (one was interrupted at shutdown):**
-1. Sweep the horizontal span in a corner fit — is span really 180 for this
-   content (3401×1586 = 2.14:1)? A span error bans any pose from fitting.
-2. Fit from the 4 pitch CORNERS as point correspondences (stronger than lines) —
-   currently ~30 px rms, so the corner clicks may be imprecise.
-3. Re-trace: **skip the far (top) touchline** (it is at the horizon, unusable);
-   land corners exactly on the pitch corners; do not click in the black margin.
+**Session 2026-10-12 — the parity bug FIXED; the metre gate is still lying.**
+- **Root cause of the degenerate fit found and fixed.** The tool labels goal lines
+  by *image side* (`calibrate.html` edge order: far/goal_right/near/goal_left),
+  while the model's camera frame puts +x on the image LEFT. A rectangular pitch
+  is 180°-rotationally symmetric so this mirror-disagreement is invisible in the
+  metres residual — the solver latched onto the mirrored branch and went
+  degenerate. `calibration_from_traces` now tries both goal-label parities
+  (`GOAL_FLIP`) and keeps the pose that renders the pitch in frame. Recorded as
+  `traced_features.label_parity`. **The user's real trace now calibrates**
+  (was `valid=false`/1-corner; now `valid=true`, 4 corners, med 0.60 m). No
+  regression: `calibrate.py --synthetic` still recovers the pose (0.31 m, no flip)
+  and `test_metric_roi.py` ALL PASS.
+- **But do NOT trust the metres yet.** With the flip the model mis-places the
+  centre circle by ~65 px (rendered overlay `out/circ_model.jpg`): the model
+  circle sits above the painted one. med_m 0.60 passes the <1.0 m gate while the
+  pose is several metres wrong mid-pitch — the exact trap §4 warns about.
+- Ruled out as the sole cause: dropping the suspect `touchline_far` (flagged 19 m,
+  vs 1.21 m overall) barely moves it; sweeping span (see below) helps size not
+  position; adding a centre-circle constraint does not move the lines-dominated fit.
+- The traced `touchline_far` (y≈730–755) sits ABOVE the horizon (row ≈790 in the
+  1586-tall crop) — geometrically impossible for a ground line → that trace is wrong.
+- **Span: the crop's effective horizontal span is ~159–165°, not 180.**
+  sidecar crop = [221,291,3401,1586] against a **3840-wide** frame → 3401/3840·180
+  = 159.4°. The old "span=180 verified" check only confirmed the code matches the
+  intended math (horizon row / yaw-0 column) — it never pinned the crop's angular
+  width. At span≈160 the model's centre circle finally matches the painted circle
+  in SIZE (w638/h63 vs ~w640/h65); span=180 is ~45 px small. Centres still ~65 px
+  apart → span is a *contributing* error, not the whole story. NOTE: span is a
+  sidecar/`normalize_frame` value (currently hard 180) — fixing it means either
+  using the full frame or rescaling span by crop/frame width.
+- **Best explanation of the residual:** the camera HEIGHT is under-constrained
+  (line fit → 5.6 m; 6-pt PnP → 8.7 m) because the camera sits essentially ON the
+  near touchline and the far touchline trace is bogus. The centre circle — a
+  well-conditioned mid-pitch feature — is the constraint that would pin it, but it
+  must be TRACED (the tool + `geom` support `centre_circle`).
+
+**DECISION 2026-10-12: accept an APPROXIMATE calibration and move on.**
+- Added a **Centre circle** shape to `calib/calibrate.html` (4 corners + bent edges,
+  all edges labelled `centre_circle`; emits `centre_circle` on save). The tool
+  previously had NO circle shape — the earlier "trace the centre circle" ask was
+  impossible until now. Syntax-checked.
+- The user traced the centre circle cleanly (`calib/circle.json`): image
+  **c(1705,845) w634 h99**. Clean and believable.
+- But **the lines and the circle cannot both be fit**: with all lines + circle no
+  pose gets below ~2 m median, and no (span, vspan) setting fixes it (grid over
+  span 100–200 × vspan 60–180: best still ~1.9 m). The lines alone fit to 0.82 m
+  but then the model circle lands ~80 px ABOVE the traced one. The traced near
+  touchline sits **inside** the paint (`out/near_bottom.jpg`) — by ~0..70 px
+  growing to the right — and the far corners don't meet (touchline vs goal line
+  ~33 px apart). The camera sits essentially ON the near touchline, so that line
+  is nearly degenerate and its error dominates.
+- Verified with a free-dimension fit that the data wants a ~105×45 pitch, not
+  105×68 (the user is adamant the pitch is 105×68) — one more sign the trace,
+  not the pitch, is the problem.
+- **Shipped:** `calib/calibration.json` = the lines-only (parity-fixed) fit of
+  `calib/calib_equirect (1).json`: P=[0.59, 5.32, 33.56], med 0.816 m, 4 corners,
+  valid=true. Source copy in `calib/calibration_barca2.json`. It is **approximate**:
+  expect metre-level error, worst mid-pitch. End-to-end run OK —
+  `python vr180_pipeline.py --video <barca> --calibration calib/calibration.json
+  --start 85 --frames 5` → 14 players/frame with on-pitch `pitch_m` coords.
+- **NEXT:** #13 goals / #14 ball can now proceed on this clip, but do NOT quote
+  distances as accurate. If accuracy is wanted later: re-trace the pitch outline
+  tightly on the paint (bottom line especially), and use a clip/camera angle that
+  is not degenerate (camera off the touchline).
 
 **Diagnostic artifacts (gitignored `out/`):** `calib_overlay.jpg`, `calib_final.jpg`,
 `trace_labels.jpg`, `calib_model_thick.jpg`, `near_touchline_crop.jpg`,
@@ -112,9 +218,11 @@ Target user: an amateur club coach — one fixed 180° camera pitch-side, no ope
 | Player detection | same model `yolo26l.pt` @1280; tiled path; ByteTrack on equirect coords = 0.90× track ratio |
 | Calibration solver | pose recovered from synthetic traces: 0.000 m clean, 0.19–0.31 % @1–2 px click noise |
 | Metric mapping | round-trip 0.0000 m; end-to-end < 0.52 m @2 px noise |
-| Metric gate + ROI | vspan honoured; above-horizon rays → `pitch_m` omitted; `calibration_valid=false` withholds metres; ROI = calibration-derived pitch rectangle (players by ground contact, ball by ground projection), grass hull fallback |
+| Metric gate | vspan honoured; above-horizon rays → `pitch_m` omitted; `calibration_valid=false` withholds metres |
+| VR180 player ROI | **traced-pitch polygon** (aligned to the paint) drops foreground spectators / far-sideline people: 26→19, 31→20, 27→17 kept on frames 0/240/480. Pose/grass remain fallbacks. |
+| VR180 player tracking | VR180-only: activation 0.0, no IoU-0.5 re-match, unconfirmed tracks emitted, min-hits 1, shape filter. 16-frame run: **17–21 players/frame, 21 unique IDs** (old: 14–19, 19 IDs). Flat defaults unchanged. |
 | Calibration input | the **4-corner pitch outline alone** recovers the pose to ~0.8 m @2 px click noise; adding the halfway line → ~0.5 m. Penalty boxes / centre circle are NOT needed. |
-| Calib tool contract | pen-tool output (4 corners + bent edges per shape) round-trips through `calib/calibrate.py`: pose recovered to 0.003 m; extra `goal_*` labels ignored |
+| Calib tool contract | Bézier-pen trace round-trips through `calib/calibrate.py` (solver self-test 0.312 m); the same trace drives the ROI polygon |
 | Goal geometry | synthetic PASS (roll-in detected; wide / over-bar / far-away rejected) |
 
 ### Open / blocked
@@ -123,7 +231,7 @@ Target user: an amateur club coach — one fixed 180° camera pitch-side, no ope
 | **Ball detection on VR180** | Finds real balls on the **full frame** (visually confirmed) but low confidence (median 0.11). Validator re-tune (Test A) and player-proximity prior (Test B) **both failed** — best 42 % coverage / 28 % multi-detection. **This is the main open problem.** |
 | Real calibration | Needs the user to trace `calib/calib_equirect.json`. Tool exists. |
 | Goal detection on real footage | Needs calibration + a clip with a confirmed goal. |
-| ROI / off-pitch filtering | **Wired** (2026-10-09): calibration-derived pitch rectangle + grass fallback. Correctness on real footage awaits a real `calib/calibration.json`. |
+| ROI / off-pitch filtering | ✅ **DONE 2026-11-24** — ROI is the traced pitch polygon (pose/grass fallbacks). Measured to drop foreground + far-sideline spectators. |
 | Virtual camera renderer | Only the pose controller (`virtual_camera.py`) exists. No video output. |
 | Integration | `--input-mode equirect` in `process.py` **not started**. |
 | Events/analytics beyond goals | Not built for equirect. |
@@ -132,6 +240,8 @@ Target user: an amateur club coach — one fixed 180° camera pitch-side, no ope
 - **Tiling is the right call.** Full-frame detection on a 180° frame (3401 px ≈ 19 px/deg) downscales ~3× → 40–45 detections for ~20 players (clutter + spectators). Tiled → 25–26. Same model, same confidence range (0.10–0.91).
 - Narrower FOV does **not** help: FOV-40 loses far recall; FOV-20 (3× upsampling) is much worse. **FOV-60 is near-optimal** (ideal ≈68° at imgsz 1280).
 - The far-side limit is **source angular resolution** (~19 px/deg), not the pipeline. An 8K source would roughly double it.
+- **Full-frame union does not add on-pitch recall** (2026-11-24): the extra boxes were subs/coaches behind the far touchline. Tiled@0.10 already finds the players.
+- ByteTrack's default **0.25 activation**, the wrapper's hard-coded **IoU-0.5 re-match**, and the one-frame **unconfirmed** delay each silently dropped far players (conf 0.10–0.25). VR180 bypasses all three; the flat pipeline keeps the defaults.
 - Equirect **span=180 has no horizontal seam** (that only exists for 360).
 - All equirect coordinates are relative to the **cropped content region**; the ball trail was once in full-frame coords → offset by the crop origin.
 
@@ -141,13 +251,15 @@ Target user: an amateur club coach — one fixed 180° camera pitch-side, no ope
 spherical_projection.py   equirect <-> perspective (equirect_to_perspective)
 spherical_tiling.py       detect_content_region, detect_span, build_grid, tile_equirect,
                           hemisphere_mask, tile_pixel_to_equirect, merge_to_equirect (centre-NMS),
+                          pitch_polygon_from_trace / trace_roi_filter (trace-derived pitch ROI),
                           grass_roi_polygon, roi_filter, sidecar <video>.equirect.json
 virtual_camera.py         compute_camera_pose (smooth follow; tested)
-calib/calibrate.html      GUIDED PEN TOOL: bar tells you the corner order (pitch/goals:
-                          top-left → top-right → bottom-right → bottom-left); edge labels
-                          follow that order, so L/R map to the goal sides. Then click any
-                          point on a line and it bends to it immediately (Catmull-Rom,
-                          unlimited points); halfway optional + pitch size -> calib_equirect.json
+calib/calibrate.html      BÉZIER PEN (2026-11-24): click = corner, click-drag = curve only
+                          the outgoing edge; drag ANY line afterwards to bend it in place
+                          (no mode, no new point). Pitch (4 anchors) required; halfway (2)
+                          and centre circle (4) optional. Auto-closes at the count; anchors
+                          move, handles bend one side, Alt-drag mirrors. Saves
+                          calib_equirect.json ({lines:[{label,points}]}).
 calib/spherical_calib.py  pose solver (6-DoF, exact line residuals), equirect_to_pitch /
                           pitch_to_equirect, calibration_from_traces (contract v1)
 calib/calibrate.py        CLI: trace file -> calibration.json
@@ -268,8 +380,17 @@ auto-detects and de-stacks (takes one eye).
 - **vspan is a first-class projection parameter** — `make_mappers(..., vspan=)` /
   `equirect_to_ground(..., vspan=)`; the pipeline feeds it the calibration's
   `vspan_deg`. Mismatching it scales every metre silently.
-- **ROI = calibration-derived pitch rectangle** (ground projection; players by
-  bbox ground contact, ball by centre), grass hull kept only as the fallback.
+- **VR180 ROI = the user's traced pitch polygon, not the fitted pose (2026-11-24).**
+  The traced pixels sit on the paint; the solved pose is too inaccurate on touchline
+  cameras (the pose polygon missed the pitch entirely on the Barca clip). Ground
+  contact = bbox bottom-centre; outward margin = 0.20 × bbox height. Pose rectangle
+  and grass hull remain fallbacks when no trace is available. The ball uses the same
+  trace polygon (5 px tolerance), with the ground-projection check as fallback.
+- **VR180 tracker = activation 0.0, no IoU-0.5 re-match, emit unconfirmed, min-hits 1,
+  shape filter (2026-11-24).** Three loss mechanisms: ByteTrack's 0.25 activation, the
+  supervision wrapper's hard-coded IoU-0.5 re-match, and one-frame "unconfirmed" new
+  tracks. All three are bypassed for VR180 only; `PlayerTracker` defaults (0.25, strict)
+  keep the flat pipeline identical. No retrain.
 - **Calibration robustness (2026-10-09, real trace):** off-frame trace points
   dropped; boundary lines are modeled as **segments** not infinite lines (infinite
   lines let points slide → degenerate poses); a **robust loss** (soft_l1) down-weights
@@ -287,6 +408,14 @@ auto-detects and de-stacks (takes one eye).
   optional refinement; penalty boxes and the centre circle were dropped. Edge
   labels are assigned by image position (near = lower in frame), so the recovered
   pose may be the pitch's mirror twin — harmless, the pitch is D2-symmetric.
+- **Calibration tool rebuilt as a true Bézier pen (2026-11-24).** Click = corner, drag =
+  curve only the outgoing edge; **drag any line afterwards to bend it in place** (no mode
+  switch, no new point). Handle drags are single-sided; Alt-drag mirrors. The separate
+  goal shapes are gone: tracing the pitch outline already produces both goal lines
+  (`goal_line_left/right`). Required = pitch; optional = halfway, centre circle. UI =
+  Pitch / Halfway / Centre circle + Calibrate. Verified in headless Node and real headless
+  Chrome (drag-to-bend works); solver self-test 0.312 m. The initial two-mode UI confused
+  the user — drag-to-bend in the default mode is the supported interaction.
 
 ## 8. Commit trail (chronological)
 `bed22d8` flat fixes → `5fd12cc`/`09d1518` Projection Phase 1 →

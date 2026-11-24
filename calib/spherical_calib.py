@@ -301,6 +301,27 @@ def solve_pose(traces, W, H, span=180.0, geom=None, seed_inits=None, max_nfev=40
 CALIB_VERSION = 1
 RMS_VALID_M = 1.0          # metric RMS below this -> calibration_valid
 
+# The traced goal lines are labelled by IMAGE side (calibrate.html: left/right
+# edge of the frame), while the model's camera frame puts +x on the image LEFT.
+# A rectangular pitch is 180-deg rotationally symmetric, so a mirror-disagreement
+# between the two conventions is invisible in the metres residual: the solver
+# happily fits the mirrored pose and the pitch renders off-frame. Flipping the
+# two goal labels is the one-pair swap that resolves the handedness.
+GOAL_FLIP = {"goal_line_left": "goal_line_right", "goal_line_right": "goal_line_left"}
+
+
+def _corners_in_frame(pose, W, H, span, vspan, dims=None):
+    """How many pitch corners project into (or just outside) the frame."""
+    d = dict(DEFAULT_PITCH); d.update(dims or {})
+    hl, hw = d["length"] / 2.0, d["width"] / 2.0
+    n = 0
+    for xm, zm in [(-hl, hw), (hl, hw), (hl, -hw), (-hl, -hw)]:
+        ex, ey = pitch_to_equirect(xm, zm, pose, W, H, span, vspan)
+        ex, ey = float(np.ravel(ex)[0]), float(np.ravel(ey)[0])
+        if -0.06 * W <= ex < 1.06 * W and -0.06 * H <= ey < 1.06 * H:
+            n += 1
+    return n
+
 
 def calibration_from_traces(src, span=None, verbose=True):
     """src: path to calib_equirect.json, or the parsed dict.
@@ -344,10 +365,33 @@ def calibration_from_traces(src, span=None, verbose=True):
 
     # robust loss: a mistraced near-horizon line (~1 px = metres) can be 100x off
     # and would otherwise swamp the least-squares fit.
-    sol = solve_pose(traces, W, H, span, geom=geom, fit_vspan=fit_vs,
-                     vspan0=vspan0, loss="soft_l1", f_scale=1.0)
+    # Try both goal-label parities (see GOAL_FLIP) and keep the pose that actually
+    # renders the pitch in frame, then the lower robust cost.
+    best = None
+    for flip in (False, True):
+        tr = [(x, y, GOAL_FLIP.get(l, l) if flip else l) for x, y, l in traces]
+        try:
+            s = solve_pose(tr, W, H, span, geom=geom, fit_vspan=fit_vs,
+                           vspan0=vspan0, loss="soft_l1", f_scale=1.0)
+        except Exception:
+            continue
+        cif = _corners_in_frame({"P": np.array(s["P"]), "rvec": np.array(s["rvec"])},
+                                W, H, span, s["vspan"], dims)
+        # a degenerate pose can have a deceptively low cost; in-frame corners first
+        key = (cif, -float(s["cost"]))
+        if best is None or key > best[0]:
+            best = (key, s, flip, cif)
+    if best is None:
+        raise RuntimeError("pose solve failed for both goal-label parities")
+    _, sol, _parity_flip, in_frame = best
     pose = {"P": np.array(sol["P"]), "rvec": np.array(sol["rvec"])}
     vspan_used = float(sol["vspan"])
+    label_parity = "goal_lines_flipped" if _parity_flip else "as_traced"
+    if _parity_flip:
+        # keep every downstream residual consistent with the chosen convention
+        traces = [(x, y, GOAL_FLIP.get(l, l)) for x, y, l in traces]
+        if verbose:
+            print("  goal_line_left/right flipped to match the model's camera frame")
 
     # quality / diagnostics from the line traces under the chosen pose
     per = {}
@@ -374,15 +418,8 @@ def calibration_from_traces(src, span=None, verbose=True):
     # degenerate fit (traced points sliding along a near-infinite line) barely
     # lowers the metre residual while putting the pitch somewhere off-screen, so
     # the metre median alone can look fine on a useless pose. Require the pitch
-    # corners to project in (or just outside) the frame.
-    d = dict(DEFAULT_PITCH); d.update(dims)
-    hl, hw = d["length"] / 2.0, d["width"] / 2.0
-    in_frame = 0
-    for xm, zm in [(-hl, hw), (hl, hw), (hl, -hw), (-hl, -hw)]:
-        ex, ey = pitch_to_equirect(xm, zm, pose, W, H, span, vspan_used)
-        ex, ey = float(np.ravel(ex)[0]), float(np.ravel(ey)[0])
-        if -0.06 * W <= ex < 1.06 * W and -0.06 * H <= ey < 1.06 * H:
-            in_frame += 1
+    # corners to project in (or just outside) the frame. (in_frame is the count
+    # already computed for the chosen parity.)
     if verbose and in_frame < 2:
         print(f"  WARNING fitted pitch does not render in frame ({in_frame}/4 corners) "
               f"-> pose is degenerate")
@@ -399,7 +436,8 @@ def calibration_from_traces(src, span=None, verbose=True):
         "camera_pose": {"position_m": [float(v) for v in pose["P"]],
                         "rotation_vector": [float(v) for v in pose["rvec"]],
                         "R": rotmat(pose["rvec"]).tolist()},
-        "traced_features": {"labels": sorted(used), "points_per_label": used},
+        "traced_features": {"labels": sorted(used), "points_per_label": used,
+                            "label_parity": label_parity},
         "quality": {"med_m": med_m, "rms_m": rms_m, "rms_px": rms_px,
                     "n_points": int(len(allres)), "valid": valid,
                     "valid_threshold_m": RMS_VALID_M,

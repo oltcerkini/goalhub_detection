@@ -301,6 +301,70 @@ def roi_filter(dets, polygon, margin=0):
 
 
 # --------------------------------------------------------------------------- #
+# 3a-2 — calibration trace -> pixel ROI
+# --------------------------------------------------------------------------- #
+PITCH_EDGE_LABELS = ("touchline_far", "goal_line_right",
+                     "touchline_near", "goal_line_left")
+
+
+def pitch_polygon_from_trace(trace, eq_w, eq_h):
+    """Build the pitch ROI polygon from the user's traced outline.
+
+    The traced pixels sit on the painted lines, so this is far more reliable
+    than projecting the fitted ground-plane pose (which is ill-conditioned on
+    touchline cameras). Legacy traces also contain goal-mouth shapes that reuse
+    the `goal_line_*` labels — keep the LONGEST line per label (the pitch edge).
+
+    Returns an (N,2) float32 polygon in the pipeline content space, or None.
+    """
+    if isinstance(trace, (str, os.PathLike)):
+        with open(trace, "r", encoding="utf-8") as f:
+            trace = json.load(f)
+    lines = (trace or {}).get("lines") or []
+    best = {}
+    for ln in lines:
+        lab = ln.get("label")
+        pts = ln.get("points")
+        if lab not in PITCH_EDGE_LABELS or not pts or len(pts) < 2:
+            continue
+        arr = np.asarray(pts, float)
+        length = float(np.linalg.norm(np.diff(arr, axis=0), axis=1).sum())
+        if lab not in best or length > best[lab][0]:
+            best[lab] = (length, arr)
+    if len(best) < 4:
+        return None
+    tw, th = (trace.get("size") or (eq_w, eq_h))
+    sx, sy = eq_w / float(tw), eq_h / float(th)
+    pts = np.vstack([best[lab][1] * (sx, sy) for lab in PITCH_EDGE_LABELS])
+    # The traced pitch is a convex outline in image space: angle-sort around
+    # its centroid so the polygon closes correctly whatever the edge order was.
+    c = pts.mean(axis=0)
+    order = np.argsort(np.arctan2(pts[:, 1] - c[1], pts[:, 0] - c[0]))
+    return pts[order].astype(np.float32)
+
+
+def trace_roi_filter(dets, polygon, margin_frac=0.20, min_margin_px=3.0,
+                     max_margin_px=60.0):
+    """Keep detections whose GROUND CONTACT (bbox bottom-centre) is on the pitch.
+
+    The outward margin scales with bbox height: a near player's box can overhang
+    the painted line by tens of px, a far player's only by a few px. That keeps
+    boundary players while still rejecting spectators well outside the line.
+    """
+    if polygon is None:
+        return list(dets), []
+    poly = np.asarray(polygon, np.float32)
+    kept, dropped = [], []
+    for d in dets:
+        x1, y1, x2, y2 = d["bbox"]
+        gx, gy = (x1 + x2) / 2.0, y2
+        m = min(max(min_margin_px, margin_frac * (y2 - y1)), max_margin_px)
+        inside = cv2.pointPolygonTest(poly, (float(gx), float(gy)), True) >= -m
+        (kept if inside else dropped).append(d)
+    return kept, dropped
+
+
+# --------------------------------------------------------------------------- #
 # 3b — per-video sidecar config
 # --------------------------------------------------------------------------- #
 def sidecar_path(video_path):

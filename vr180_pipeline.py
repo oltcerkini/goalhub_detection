@@ -33,15 +33,30 @@ sys.path.insert(0, str(Path(__file__).parent / "calib"))
 
 from equirect import normalize_frame                       # noqa: E402
 from spherical_tiling import (build_grid, tile_equirect, merge_to_equirect,   # noqa: E402
-                              grass_roi_polygon, roi_filter)
+                              grass_roi_polygon, roi_filter,
+                              pitch_polygon_from_trace, trace_roi_filter)
 from player_tracker import PlayerTracker                    # noqa: E402
 
 MODE = "equirect"
 TRACK_VERSION = 1
 BALL_CONF = 0.05
 PLAYER_CONF = 0.10
+# ByteTrack's default activation (0.25) drops far players that the tiled
+# detector finds at 0.10-0.25. Activating at 0 -> det_thresh 0.10, so every
+# kept detection can start a track; the hit filter below removes one-frame noise.
+TRACK_ACTIVATION = 0.0
+TRACK_MIN_HITS = 1
+MIN_BOX_H = 8.0
+BOX_ASPECT = (0.6, 8.0)      # height / width allowed for a standing player
 BALL_MODEL = "ball_detector_yolo26m.engine"
 PLAYER_MODEL = "yolo26l.pt"
+
+
+def _plausible_player_box(b):
+    w, h = b[2] - b[0], b[3] - b[1]
+    if w <= 1.0 or h < MIN_BOX_H:
+        return False
+    return BOX_ASPECT[0] <= (h / w) <= BOX_ASPECT[1]
 
 
 def load_calibration(path):
@@ -90,13 +105,52 @@ def make_metric(cal, W, H, roi_margin_m=3.0):
     return {"valid": valid, "to_pitch": to_pitch, "on_pitch": on_pitch}
 
 
+def _transcode_h264(path, verbose=True):
+    """cv2 writes mp4v, which browsers won't play. Remux to h264 when ffmpeg exists."""
+    import os
+    import shutil
+    import subprocess
+    if shutil.which("ffmpeg") is None:
+        return path
+    src = str(path) + ".src.mp4"
+    os.replace(str(path), src)
+    try:
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", src,
+                        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+                        str(path)], check=True, timeout=3600)
+    except Exception:                                 # noqa: BLE001
+        os.replace(src, str(path))                    # keep the mp4v file if ffmpeg fails
+    else:
+        try:
+            os.remove(src)
+        except OSError:
+            pass
+    if verbose:
+        print(f"rendered {path}")
+    return path
+
+
 def run(video, calibration=None, span=180.0, fov=60.0, start_s=0.0, max_frames=None,
-        step=1, ball=True, roi=True, verbose=True):
+        step=1, ball=True, roi=True, region=None, render=None, trace=None,
+        roi_margin_frac=0.20, track_activation=TRACK_ACTIVATION,
+        track_min_hits=TRACK_MIN_HITS, verbose=True):
+    # region: pin the content crop [x,y,w,h]. The auto-detector can drift a few px
+    # between frames; when the calibration trace was drawn on one frame, every
+    # frame must be cropped identically or the pose is applied to a shifted space.
     cal = load_calibration(calibration)
+    if trace is None and calibration:
+        # app180 saves <video_id>_trace.json next to <video_id>.json
+        cand = Path(calibration).with_name(Path(calibration).stem + "_trace.json")
+        if cand.exists():
+            trace = cand
+    if trace and not isinstance(trace, dict):
+        trace = json.loads(Path(trace).read_text())
     player_model = __import__("ultralytics").YOLO(PLAYER_MODEL)
     ball_model = __import__("ultralytics").YOLO(BALL_MODEL) if ball else None
     tracker = PlayerTracker(max_missed=90, proximity_px=250,
-                            appearance_threshold=0.4, match_distance_weight=0.5)
+                            appearance_threshold=0.4, match_distance_weight=0.5,
+                            track_activation_threshold=track_activation)
+    track_hits = {}
 
     cap = cv2.VideoCapture(video)
     fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
@@ -104,9 +158,12 @@ def run(video, calibration=None, span=180.0, fov=60.0, start_s=0.0, max_frames=N
 
     grid = build_grid(span, fov)
     frames, ball_trail = [], []
+    writer = None
     W = H = None
     metric = None
     roi_poly = None
+    trace_poly = None
+    roi_mode = None
     t0 = time.time()
     n = 0
     while True:
@@ -115,12 +172,14 @@ def run(video, calibration=None, span=180.0, fov=60.0, start_s=0.0, max_frames=N
             break
         if n % step:
             n += 1; continue
-        content, meta = normalize_frame(raw, span=span)
+        content, meta = normalize_frame(raw, span=span, region=region)
         if W is None:
             H, W = content.shape[:2]
             metric = make_metric(cal, W, H)
-            # grass-ROI only needed when there is no calibration-based pitch ROI
-            if roi and not (metric and metric["valid"]):
+            # The traced outline sits on the paint, so prefer it over the fitted
+            # pose (ill-conditioned on touchline cameras). Grass is the last resort.
+            trace_poly = pitch_polygon_from_trace(trace, W, H) if trace else None
+            if roi and trace_poly is None and not (metric and metric["valid"]):
                 roi_poly = grass_roi_polygon(content)
         fidx = int(round(cap.get(cv2.CAP_PROP_POS_FRAMES)))
 
@@ -136,13 +195,22 @@ def run(video, calibration=None, span=180.0, fov=60.0, start_s=0.0, max_frames=N
                     dets.append({"tile_id": tid, "yaw": yaw, "pitch": pitch, "fov": f,
                                  "bbox": tuple(map(float, b)), "conf": float(s), "cls": 0})
         merged, _ = merge_to_equirect(dets, span, W, H, criterion="center")
-        if roi and metric and metric["valid"]:
-            # calibration-derived ROI: keep only ground-contact points on the pitch
+        merged = [m for m in merged if _plausible_player_box(m["bbox"])]
+        roi_mode = None
+        if roi and trace_poly is not None:
+            # ROI from the user's traced pitch outline (ground-contact point)
+            merged, _ = trace_roi_filter(merged, trace_poly,
+                                         margin_frac=roi_margin_frac)
+            roi_mode = "trace"
+        elif roi and metric and metric["valid"]:
+            # fallback: calibration-derived ground rectangle
             merged = [m for m in merged
                       if metric["on_pitch"]((m["bbox"][0] + m["bbox"][2]) / 2.0,
                                             m["bbox"][3])]
+            roi_mode = "pose"
         elif roi_poly is not None:
             merged, _ = roi_filter(merged, roi_poly)
+            roi_mode = "grass"
 
         # track
         tracks = []
@@ -150,11 +218,16 @@ def run(video, calibration=None, span=180.0, fov=60.0, start_s=0.0, max_frames=N
             d = sv.Detections(xyxy=np.array([m["bbox"] for m in merged], float),
                               confidence=np.array([m["conf"] for m in merged], float),
                               class_id=np.zeros(len(merged), int))
-            tr = tracker.update(d, frame=None)
+            tr = tracker.update(d, frame=None, strict_iou=False)
             if tr is not None and tr.tracker_id is not None:
                 for i in range(len(tr)):
-                    x1, y1, x2, y2 = map(float, tr.xyxy[i])
                     tid = int(tr.tracker_id[i])
+                    track_hits[tid] = track_hits.get(tid, 0) + 1
+                    # First frame: emit everything so a 1-frame run still shows
+                    # players. After that, a track needs `track_min_hits` frames.
+                    if frames and track_hits[tid] < track_min_hits:
+                        continue
+                    x1, y1, x2, y2 = map(float, tr.xyxy[i])
                     gx, gy = (x1 + x2) / 2, y2            # GROUND CONTACT (bottom-centre)
                     rec = {"id": tid, "bbox": [round(v, 1) for v in (x1, y1, x2, y2)],
                            "conf": round(float(tr.confidence[i]), 3),
@@ -176,8 +249,12 @@ def run(video, calibration=None, span=180.0, fov=60.0, start_s=0.0, max_frames=N
                     cx = (b[0] + b[2]) / 2 - meta["region"][0]
                     cy = (b[1] + b[3]) / 2 - meta["region"][1]
                     conf = float(r.boxes.conf.cpu().numpy()[j])
-                    off_pitch = bool(metric and metric["valid"]
-                                     and metric["on_pitch"](cx, cy) is False)
+                    if trace_poly is not None:
+                        off_pitch = cv2.pointPolygonTest(
+                            trace_poly, (float(cx), float(cy)), True) < -5.0
+                    else:
+                        off_pitch = bool(metric and metric["valid"]
+                                         and metric["on_pitch"](cx, cy) is False)
                     if not off_pitch:
                         ball_rec = {"eq": [round(float(cx), 1), round(float(cy), 1)],
                                     "conf": round(conf, 3)}
@@ -190,6 +267,29 @@ def run(video, calibration=None, span=180.0, fov=60.0, start_s=0.0, max_frames=N
 
         frames.append({"frame": fidx, "t": round(fidx / fps, 2),
                        "players": tracks, "ball": ball_rec})
+
+        if render is not None:                       # annotated video of the content
+            if writer is None:
+                writer = cv2.VideoWriter(render, cv2.VideoWriter_fourcc(*"mp4v"),
+                                         max(fps / max(step, 1), 1.0), (W, H))
+            vis = content.copy()
+            for p in tracks:
+                x1, y1, x2, y2 = [int(v) for v in p["bbox"]]
+                cv2.rectangle(vis, (x1, y1), (x2, y2), (60, 220, 130), 2)
+                tag = f'#{p["id"]}'
+                if p.get("pitch_m"):
+                    tag += f'  {p["pitch_m"][0]:.1f},{p["pitch_m"][1]:.1f} m'
+                org = (x1, max(16, y1 - 6))
+                cv2.putText(vis, tag, org, cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3, cv2.LINE_AA)
+                cv2.putText(vis, tag, org, cv2.FONT_HERSHEY_SIMPLEX, 0.55, (60, 220, 130), 1, cv2.LINE_AA)
+            if ball_rec:
+                cv2.circle(vis, tuple(int(v) for v in ball_rec["eq"]), 12, (0, 215, 255), 2)
+            hdr = f'{fidx / fps:6.1f}s   players {len(tracks)}'
+            if not (cal and cal.get("quality", {}).get("valid", False)):
+                hdr += "   (no calibration — positions unavailable)"
+            cv2.putText(vis, hdr, (14, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 4, cv2.LINE_AA)
+            cv2.putText(vis, hdr, (14, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
+            writer.write(vis)
         n += 1
         if max_frames and len(frames) >= max_frames:
             break
@@ -197,12 +297,18 @@ def run(video, calibration=None, span=180.0, fov=60.0, start_s=0.0, max_frames=N
             print(f"  {len(frames)} frames, {len(tracks)} tracks this frame, "
                   f"{time.time()-t0:.0f}s")
     cap.release()
+    if writer is not None:
+        writer.release()
+        _transcode_h264(render, verbose)
 
     out = {
         "version": TRACK_VERSION, "mode": MODE, "video": str(video),
         "image_size": [W, H], "span_deg": span,
         "layout": meta["layout"], "region": meta["region"],
         "calibration_valid": bool(cal and cal.get("quality", {}).get("valid", False)),
+        "roi_mode": roi_mode, "roi_margin_frac": roi_margin_frac,
+        "track_activation": track_activation, "track_min_hits": track_min_hits,
+        "tracker_strict_iou": False,
         "fps": fps, "frames": frames, "ball_trail": ball_trail,
     }
     if verbose:
@@ -220,10 +326,23 @@ def main():
     ap.add_argument("--frames", type=int, default=None)
     ap.add_argument("--step", type=int, default=1)
     ap.add_argument("--no-ball", action="store_true")
+    ap.add_argument("--region", type=int, nargs=4, default=None,
+                    help="pin the content crop [x y w h] (must match the calibration frame)")
+    ap.add_argument("--trace", default=None,
+                    help="calibration trace JSON; its pitch outline becomes the ROI")
+    ap.add_argument("--roi-margin-frac", type=float, default=0.20,
+                    help="ground-contact margin as a fraction of bbox height")
+    ap.add_argument("--track-activation", type=float, default=TRACK_ACTIVATION,
+                    help="ByteTrack activation threshold (0 = track all kept detections)")
+    ap.add_argument("--track-min-hits", type=int, default=TRACK_MIN_HITS,
+                    help="frames a track must appear before it is emitted")
+    ap.add_argument("--render", default=None, help="write an annotated mp4 here")
     ap.add_argument("--out", default="out/track.json")
     a = ap.parse_args()
     res = run(a.video, a.calibration, a.span, start_s=a.start, max_frames=a.frames,
-              step=a.step, ball=not a.no_ball)
+              step=a.step, ball=not a.no_ball, region=a.region, render=a.render,
+              trace=a.trace, roi_margin_frac=a.roi_margin_frac,
+              track_activation=a.track_activation, track_min_hits=a.track_min_hits)
     Path(a.out).parent.mkdir(parents=True, exist_ok=True)
     Path(a.out).write_text(json.dumps(res, indent=1))
     print(f"wrote {a.out}")

@@ -1,269 +1,611 @@
 <!doctype html>
 <html><head><meta charset="utf-8">
-<title>Equirect pitch calibration — pen tool</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pitch calibration — pen tool</title>
 <style>
-  :root{--bg:#14181d;--fg:#e8eaed;--mut:#9aa0a6;--acc:#4c8bf5}
-  *{box-sizing:border-box} html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);
-    font:13px/1.4 system-ui,Segoe UI,Roboto,sans-serif;overflow:hidden}
-  #bar{position:fixed;inset:0 0 auto 0;min-height:46px;display:flex;gap:8px;align-items:center;
-    padding:6px 10px;background:#1b2027;border-bottom:1px solid #2a313a;z-index:5;flex-wrap:wrap}
-  button,select,input[type=file],input[type=number]{background:#232a33;color:var(--fg);
-    border:1px solid #333c47;border-radius:6px;padding:6px 9px;font:inherit;cursor:pointer}
-  button:hover{background:#2b333d} button.on{background:var(--acc);border-color:var(--acc)}
-  #wrap{position:absolute;inset:46px 0 0 0;overflow:hidden;touch-action:none;cursor:crosshair}
+  :root{--bg:#0d1117;--panel:#161b22;--line:#30363d;--fg:#e6edf3;--mut:#8b949e;
+        --acc:#2f81f7;--ok:#3fb950;--warn:#d29922;--gold:#ffd740}
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);color:var(--fg);
+    font:13px/1.45 system-ui,"Segoe UI",Roboto,sans-serif}
+  #bar{position:fixed;inset:0 0 auto 0;height:54px;display:flex;align-items:center;gap:10px;
+    padding:0 14px;background:var(--panel);border-bottom:1px solid var(--line);z-index:5;
+    overflow-x:auto;white-space:nowrap}
+  .brand{font-weight:650;letter-spacing:.2px;white-space:nowrap}
+  .brand small{color:var(--mut);font-weight:400;margin-left:7px}
+  .sep{width:1px;height:26px;background:var(--line);margin:0 1px;flex:none}
+  .size{display:flex;align-items:center;gap:6px;color:var(--mut);white-space:nowrap}
+  select,input[type=number]{background:#0d1117;color:var(--fg);border:1px solid var(--line);
+    border-radius:6px;padding:6px 7px;font:inherit}
+  input[type=number]{width:62px}
+  .tools{display:flex;gap:6px}
+  .chip{display:inline-flex;align-items:center;gap:7px;background:#21262d;color:var(--fg);
+    border:1px solid var(--line);border-radius:7px;padding:7px 11px;font:inherit;font-weight:550;
+    cursor:pointer;white-space:nowrap}
+  .chip:hover{background:#2b333d}
+  .chip .dot{width:9px;height:9px;border-radius:50%;background:var(--c);flex:none}
+  .chip.on{border-color:var(--acc);box-shadow:0 0 0 1px var(--acc) inset;background:#17212f}
+  .chip .tick{color:var(--ok);font-weight:700;display:none}
+  .chip.done .tick{display:inline}
+  .chip .x{color:var(--mut);font-weight:700;visibility:hidden;padding:0 1px}
+  .chip.done .x{visibility:visible}
+  .chip .x:hover{color:#ff7b72}
+  .spacer{flex:1}
+  .btn{background:#21262d;color:var(--fg);border:1px solid var(--line);border-radius:7px;
+    padding:7px 12px;font:inherit;cursor:pointer;white-space:nowrap}
+  .btn:hover{background:#2b333d}
+  .btn.primary{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:650;
+    padding:8px 18px}
+  .btn.primary:hover{background:#4a9eff}
+  .btn:disabled{opacity:.5;cursor:default}
+  #wrap{position:absolute;inset:54px 0 0 0;overflow:hidden;touch-action:none;cursor:default;
+    background:#05070a}
   canvas{display:block;position:absolute;left:0;top:0}
-  #hint{position:absolute;left:10px;bottom:10px;max-width:720px;background:#000b;padding:9px 12px;
-    border-radius:6px;color:var(--mut);font-size:12.5px;pointer-events:none;line-height:1.55}
-  #hint b{color:var(--fg)} #hint .step{color:#ffd740;font-weight:600}
-  #info{margin-left:auto;color:var(--mut);font-variant-numeric:tabular-nums}
-  .grp{display:flex;gap:6px;align-items:center;color:var(--mut)}
-  .swatch{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:middle}
+  #guide{position:absolute;left:50%;top:12px;transform:translateX(-50%);max-width:480px;
+    background:#0d1117e6;border:1px solid var(--line);border-radius:9px;padding:11px 13px;
+    pointer-events:none;backdrop-filter:blur(4px);line-height:1.5;box-shadow:0 4px 20px #0005}
+  #guide .t{font-weight:650;margin-bottom:3px}
+  #guide .n{color:var(--gold)}
+  #guide .k{color:var(--mut)}
+  #checks{margin-top:8px;display:flex;gap:14px;color:var(--mut);font-size:12px;flex-wrap:wrap}
+  #checks b{color:var(--fg);font-weight:600}
+  #checks .done b{color:var(--ok)}
+  #hint{position:absolute;left:50%;transform:translateX(-50%);bottom:12px;color:var(--mut);
+    font-size:12px;background:#0d1117b8;border:1px solid var(--line);border-radius:7px;
+    padding:6px 10px;pointer-events:none;max-width:96%;white-space:nowrap;overflow:hidden;
+    text-overflow:ellipsis}
+  @media (max-width:1050px){ .brand small{display:none} }
 </style></head>
 <body>
 <div id="bar">
-  <input type="file" id="file" accept="image/*">
-  <span class="grp"><b>Pitch:</b>
+  <div class="brand">Pitch calibration<small>draw the field lines</small></div>
+  <div class="sep"></div>
+  <span class="size">Pitch
     <select id="preset"></select>
-    <input type="number" id="plen" step="0.5" style="width:64px"> ×
-    <input type="number" id="pwid" step="0.5" style="width:64px"> m
+    <input type="number" id="plen" step="0.5"> ×
+    <input type="number" id="pwid" step="0.5"> m
   </span>
-  <button id="t_pitch">Pitch <span class="swatch" style="background:#40c4ff"></span></button>
-  <button id="t_goal_left">Goal L <span class="swatch" style="background:#69f0ae"></span></button>
-  <button id="t_goal_right">Goal R <span class="swatch" style="background:#ffd740"></span></button>
-  <button id="t_halfway">Halfway <span class="swatch" style="background:#e040fb"></span></button>
-  <button id="undo">Undo</button>
-  <button id="clearall">Clear</button>
-  <button id="save">Save JSON</button>
-  <button id="fit">Fit</button>
-  <span id="info"></span>
+  <div class="sep"></div>
+  <div class="tools">
+    <button class="chip" data-type="pitch" style="--c:#40c4ff"><span class="dot"></span><span>Pitch</span><span class="tick">✓</span><span class="x" title="remove">×</span></button>
+    <button class="chip" data-type="halfway" style="--c:#e040fb"><span class="dot"></span><span>Halfway</span><span class="tick">✓</span><span class="x" title="remove">×</span></button>
+    <button class="chip" data-type="centre_circle" style="--c:#ff5252"><span class="dot"></span><span>Centre circle</span><span class="tick">✓</span><span class="x" title="remove">×</span></button>
+  </div>
+  <div class="spacer"></div>
+  <button id="openBtn" class="btn">Open frame</button>
+  <button id="helpBtn" class="btn" title="Show instructions">?</button>
+  <button id="undo" class="btn">Undo</button>
+  <button id="clearall" class="btn">Clear</button>
+  <button id="fit" class="btn">Fit</button>
+  <button id="save" class="btn primary">Calibrate</button>
+  <input type="file" id="file" accept="image/*" hidden>
 </div>
+
 <div id="wrap"><canvas id="cv"></canvas>
-  <div id="hint"></div>
+  <div id="guide"><div class="t" id="gt"></div><div id="gb"></div><div id="checks"></div></div>
+  <div id="hint">Wheel = zoom · Shift-drag = pan · Backspace = remove last point · Esc = cancel · Ctrl+Z = undo</div>
 </div>
+
 <script>
 // ---------------------------------------------------------------------------
-// Guided pen tool. Click a shape, then click its corners IN THE ORDER the bar
-// tells you (top-left -> top-right -> bottom-right -> bottom-left). Then shape
-// each edge: click a point ON the line and it bends to it immediately; drag any
-// point/corner to fine-tune; alt-click a point to remove. Edges are Catmull-Rom
-// splines through the corners + added points (unlimited points per edge).
+// Illustrator-style pen tool for VR180 pitch calibration.
+//
+//   * Pick a shape (Pitch / Halfway / Centre circle).
+//   * Click to drop an anchor. Click-and-DRAG to pull out the tangent handles:
+//     the edge bends to follow the painted line (fisheye curves are not lines).
+//   * The path closes (or finishes) automatically at the required point count.
+//   * Drag square anchors to move them; drag round handles to bend an edge.
+//     Alt-drag a handle to break symmetry (make a sharp corner).
+//
+// Saved trace schema is unchanged: {lines:[{label, points:[[x,y]...]}]}.
 // ---------------------------------------------------------------------------
-const cv=document.getElementById('cv'), ctx=cv.getContext('2d');
-const info=document.getElementById('info'), hint=document.getElementById('hint');
+const $ = id => document.getElementById(id);
+const cv = $('cv'), ctx = cv.getContext('2d');
+const gt = $('gt'), gb = $('gb'), checks = $('checks');
+const guide = $('guide'), hint = $('hint');
+const QP = new URLSearchParams(location.search);
+const toImg = (px,py) => [(px-view.tx)/view.s, (py-view.ty)/view.s];
+const toScr = (x,y) => [x*view.s+view.tx, y*view.s+view.ty];
 
-// cnames = the order you click the corners. edgeLabels[i] labels edge i->i+1.
-const TYPES={
-  pitch:{corners:4, closed:true, color:'#40c4ff', name:'Pitch',
-    cnames:['top-left','top-right','bottom-right','bottom-left'],
-    note:'Top edge = FAR touchline · bottom edge = NEAR touchline · left edge = LEFT goal, right edge = RIGHT goal.',
-    edgeLabels:['touchline_far','goal_line_right','touchline_near','goal_line_left']},
-  goal_left:{corners:4, closed:true, color:'#69f0ae', name:'Goal left',
-    cnames:['post · top-left','post · top-right','post · bottom-right','post · bottom-left'],
-    note:'The goal mouth: top = crossbar, bottom = the goal line on the grass.',
-    edgeLabels:['goal_top','goal_right','goal_ground','goal_left']},
-  goal_right:{corners:4, closed:true, color:'#ffd740', name:'Goal right',
-    cnames:['post · top-left','post · top-right','post · bottom-right','post · bottom-left'],
-    note:'The goal mouth: top = crossbar, bottom = the goal line on the grass.',
-    edgeLabels:['goal_top','goal_right','goal_ground','goal_left']},
-  halfway:{corners:2, closed:false, color:'#e040fb', name:'Halfway',
-    cnames:['one end (on a touchline)','other end (on the other touchline)'],
-    note:'Optional — the pitch outline alone is enough.',
-    edgeLabels:['halfway']},
+// count = anchors needed; labels = what each sampled segment is called in the trace
+const TYPES = {
+  pitch:{count:4, closed:true, color:'#40c4ff', name:'Pitch',
+    labels:['touchline_far','goal_line_right','touchline_near','goal_line_left'],
+    hint:'Click the four corners in order: top-left, top-right, bottom-right, bottom-left. Drag as you click so each edge hugs the painted line.'},
+  halfway:{count:2, closed:false, color:'#e040fb', name:'Halfway',
+    labels:['halfway'],
+    hint:'Optional. Click one end on a touchline, then the other end. Drag if the line curves.'},
+  centre_circle:{count:4, closed:true, color:'#ff5252', name:'Centre circle',
+    labels:['centre_circle','centre_circle','centre_circle','centre_circle'],
+    hint:'Optional, but it helps most. Click four points around the circle, dragging along the paint so the curve follows it.'},
 };
 
-// ---- pitch dimensions (the system asks for the real pitch size) ----
-const PRESETS={
+// ---- pitch dimensions ------------------------------------------------------
+const PRESETS = {
   "11v11 105×68":{length:105,width:68,penalty_depth:16.5,penalty_half:20.16,circle_r:9.15,goal_half_width:3.66,goal_height:2.44},
   "9v9 80×50":{length:80,width:50,penalty_depth:13,penalty_half:16.5,circle_r:8.0,goal_half_width:3.66,goal_height:2.13},
   "7v7 60×40":{length:60,width:40,penalty_depth:9,penalty_half:13,circle_r:6.0,goal_half_width:3.0,goal_height:2.0},
   "custom":{length:105,width:68,penalty_depth:16.5,penalty_half:20.16,circle_r:9.15,goal_half_width:3.66,goal_height:2.44}};
-let pitch=Object.assign({},PRESETS["11v11 105×68"]);
-const presetSel=document.getElementById('preset'), plen=document.getElementById('plen'), pwid=document.getElementById('pwid');
-Object.keys(PRESETS).forEach(k=>presetSel.append(new Option(k,k)));
-const syncP=()=>{plen.value=pitch.length; pwid.value=pitch.width;};
-presetSel.onchange=()=>{pitch=Object.assign({},PRESETS[presetSel.value]); syncP();};
-plen.oninput=()=>{pitch.length=+plen.value; presetSel.value='custom';};
-pwid.oninput=()=>{pitch.width=+pwid.value; presetSel.value='custom';};
+let pitch = Object.assign({}, PRESETS["11v11 105×68"]);
+const presetSel = $('preset'), plen = $('plen'), pwid = $('pwid');
+Object.keys(PRESETS).forEach(k => presetSel.append(new Option(k,k)));
+const syncP = () => { plen.value = pitch.length; pwid.value = pitch.width; };
+presetSel.onchange = () => { pitch = Object.assign({}, PRESETS[presetSel.value]); syncP(); };
+plen.oninput = () => { pitch.length = +plen.value; presetSel.value = 'custom'; };
+pwid.oninput = () => { pitch.width = +pwid.value; presetSel.value = 'custom'; };
 syncP();
 
-// ---- state ----
-let img=new Image(), view={s:1,tx:0,ty:0};
-let shapes=[];            // [{type, corners:[[x,y]..], knots:[[ [x,y].. ]..]}]
-let history=[];           // undo snapshots
-let tool=null;            // active placement type
-let pending=[];           // corners clicked so far for the active tool
-let drag=null;            // {si, kind:'corner'|'knot', i, k}
-let panning=null;
-const toImg=(px,py)=>[(px-view.tx)/view.s,(py-view.ty)/view.s];
-const toScr=(x,y)=>[x*view.s+view.tx, y*view.s+view.ty];
+// ---- state -----------------------------------------------------------------
+let img = new Image();
+let view = {s:1, tx:0, ty:0};
+let shapes = [];        // [{type, anchors:[{x,y,ix,iy,ox,oy}], closed}]
+let history = [];       // undo snapshots (JSON of shapes)
+let drawing = null;     // {type, anchors:[...]} while placing a path
+let penDrag = -1;       // index of the anchor whose handles are being dragged
+let selected = null;    // type of the shape being edited
+let drag = null;        // {kind:'anchor'|'handle', type, i[, which]}
+let panning = null;
+let guideVisible = true;
 
-function resize(){const w=cv.parentElement.clientWidth,h=cv.parentElement.clientHeight;
-  cv.width=w;cv.height=h;ctx.imageSmoothingEnabled=view.s<1;}
-function fit(){const w=cv.parentElement.clientWidth,h=cv.parentElement.clientHeight;
-  const s=Math.min(w/img.naturalWidth,h/img.naturalHeight)*0.98;
-  view={s,tx:(w-img.naturalWidth*s)/2,ty:(h-img.naturalHeight*s)/2};resize();draw();}
+const getShape = t => shapes.find(s => s.type === t);
+const newAnchor = (x,y) => ({x,y, ix:0, iy:0, ox:0, oy:0});
+const hIn  = a => [a.x + a.ix, a.y + a.iy];
+const hOut = a => [a.x + a.ox, a.y + a.oy];
 
-// ---- geometry ----
-const edgeCount=(sh)=>{const n=sh.corners.length; return TYPES[sh.type].closed?n:n-1;};
-const controlPts=(sh,i)=>{const n=sh.corners.length; return [sh.corners[i], ...(sh.knots[i]||[]), sh.corners[(i+1)%n]];};
-function catmullRom(pts,seg=14){
-  if(pts.length<2) return pts.map(p=>[p[0],p[1]]);
-  const P=[pts[0],...pts,pts[pts.length-1]], out=[];
-  for(let i=1;i<P.length-2;i++){ const p0=P[i-1],p1=P[i],p2=P[i+1],p3=P[i+2];
-    for(let j=0;j<seg;j++){ const t=j/seg,t2=t*t,t3=t2*t;
-      out.push([
-        0.5*(2*p1[0]+(-p0[0]+p2[0])*t+(2*p0[0]-5*p1[0]+4*p2[0]-p3[0])*t2+(-p0[0]+3*p1[0]-3*p2[0]+p3[0])*t3),
-        0.5*(2*p1[1]+(-p0[1]+p2[1])*t+(2*p0[1]-5*p1[1]+4*p2[1]-p3[1])*t2+(-p0[1]+3*p1[1]-3*p2[1]+p3[1])*t3)]); } }
-  out.push([pts[pts.length-1][0],pts[pts.length-1][1]]); return out;
+function resize(){
+  const w = cv.parentElement.clientWidth, h = cv.parentElement.clientHeight;
+  cv.width = w; cv.height = h;
+  ctx.imageSmoothingEnabled = view.s < 1;
 }
-const sampleEdge=(sh,i,seg=14)=>catmullRom(controlPts(sh,i),seg);
-const withDefaults=(type,corners)=>({type, corners:corners.map(p=>[p[0],p[1]]),
-  knots:Array.from({length:TYPES[type].closed?corners.length:corners.length-1},()=>[])});
+function fit(){
+  if (!img.naturalWidth) { resize(); draw(); return; }
+  const w = cv.parentElement.clientWidth, h = cv.parentElement.clientHeight;
+  const s = Math.min(w/img.naturalWidth, h/img.naturalHeight) * 0.98;
+  view = {s, tx:(w-img.naturalWidth*s)/2, ty:(h-img.naturalHeight*s)/2};
+  resize(); draw();
+}
 
-// ---- draw ----
-function draw(){
-  ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,cv.width,cv.height);
-  ctx.setTransform(view.s,0,0,view.s,view.tx,view.ty);
-  if(img.complete&&img.naturalWidth) ctx.drawImage(img,0,0);
-  ctx.lineJoin='round'; ctx.lineCap='round';
-  const R=4/view.s;
+// ---- geometry --------------------------------------------------------------
+function bezier(p0,p1,p2,p3,seg){
+  const out = [];
+  for (let j=0;j<=seg;j++){
+    const t=j/seg, u=1-t, u2=u*u, t2=t*t;
+    out.push([
+      u2*u*p0[0] + 3*u2*t*p1[0] + 3*u*t2*p2[0] + t2*t*p3[0],
+      u2*u*p0[1] + 3*u2*t*p1[1] + 3*u*t2*p2[1] + t2*t*p3[1]]);
+  }
+  return out;
+}
+function sampleEdge(sh,i,seg=24){
+  const n = sh.anchors.length, a = sh.anchors[i], b = sh.anchors[(i+1)%n];
+  return bezier([a.x,a.y], hOut(a), hIn(b), [b.x,b.y], seg);
+}
+const edgeCount = sh => sh.closed ? sh.anchors.length : sh.anchors.length - 1;
 
-  shapes.forEach(sh=>{
-    const t=TYPES[sh.type]; ctx.strokeStyle=t.color; ctx.lineWidth=2.5/view.s;
-    for(let i=0;i<edgeCount(sh);i++){ const s=sampleEdge(sh,i);
-      ctx.beginPath(); s.forEach(([x,y],j)=>j?ctx.lineTo(x,y):ctx.moveTo(x,y)); ctx.stroke(); }
-    sh.corners.forEach(([x,y],i)=>{
-      if(t.closed && i===0){ // highlight the start corner
-        ctx.beginPath(); ctx.arc(x,y,9/view.s,0,7); ctx.strokeStyle='#ffd740'; ctx.lineWidth=2/view.s; ctx.stroke(); }
-      ctx.fillStyle=t.color; ctx.fillRect(x-R,y-R,2*R,2*R);
-      ctx.strokeStyle='#000'; ctx.lineWidth=1/view.s; ctx.strokeRect(x-R,y-R,2*R,2*R); });
-    sh.knots.forEach(ks=>ks.forEach(([x,y])=>{ ctx.beginPath(); ctx.arc(x,y,4.5/view.s,0,7);
-      ctx.fillStyle='#14181d'; ctx.fill(); ctx.strokeStyle=t.color; ctx.lineWidth=2/view.s; ctx.stroke(); }));
-  });
-
-  // live edge labels for the pitch (by the guided order)
-  const ps=shapes.find(s=>s.type==='pitch');
-  if(ps){ const labs=TYPES.pitch.edgeLabels; ctx.font=`${11/view.s}px system-ui`;
-    for(let i=0;i<edgeCount(ps);i++){ const s=sampleEdge(ps,i,14), m=s[Math.floor(s.length/2)];
-      ctx.fillStyle='#000'; const w=ctx.measureText(labs[i]).width/view.s;
-      ctx.fillRect(m[0]-w/2-2/view.s, m[1]-13/view.s, w+4/view.s, 12/view.s);
-      ctx.fillStyle=ps&&i===0?'#ffd740':'#40c4ff'; ctx.textAlign='center'; ctx.fillText(labs[i],m[0],m[1]-4/view.s); }
-    ctx.textAlign='left'; }
-
-  // placement feedback: numbered corners
-  ctx.setTransform(1,0,0,1,0,0);
-  pending.forEach((p,k)=>{ const [sx,sy]=toScr(...p), r=11;
-    ctx.beginPath(); ctx.arc(sx,sy,r,0,7); ctx.fillStyle='#ffd740'; ctx.fill();
-    ctx.fillStyle='#111'; ctx.font='bold 13px system-ui'; ctx.textAlign='center'; ctx.textBaseline='middle';
-    ctx.fillText(String(k+1),sx,sy+0.5); });
-  ctx.textAlign='left'; ctx.textBaseline='alphabetic';
-
-  info.textContent=`${img.naturalWidth||0}×${img.naturalHeight||0} · ${shapes.length} shape(s) · zoom ${view.s.toFixed(2)}×`;
-  if(tool){
-    const t=TYPES[tool], k=pending.length;
-    hint.innerHTML = `Placing <b>${t.name}</b> — click corner <span class="step">${k+1}/${t.corners}: ${t.cnames[k].toUpperCase()}</span>`+
-      (t.note?`<br>${t.note}`:'')+`<br>Esc cancels.`;
-  } else if(shapes.length){
-    hint.innerHTML = `Shape the lines: <b>click any point on a line and it bends to it immediately</b> · drag points/corners to fine-tune · `+
-      `<b>alt-click</b> a point to remove · wheel = zoom · shift-drag = pan.`;
-  } else {
-    hint.innerHTML = `Start with <b>Pitch</b>: click its 4 corners in the order shown (top-left → top-right → bottom-right → bottom-left), `+
-      `then click along each line to curve it.`;
+function pathThrough(anchors, closed, seg){
+  const n = anchors.length, ec = closed ? n : n-1;
+  ctx.beginPath();
+  for (let i=0;i<ec;i++){
+    const a=anchors[i], b=anchors[(i+1)%n];
+    bezier([a.x,a.y], hOut(a), hIn(b), [b.x,b.y], seg).forEach(([x,y],j) => {
+      if (i===0 && j===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+    });
   }
 }
 
-// ---- hit testing ----
-const R_SCREEN=12;
-function pickPoint(px,py){
-  for(let si=shapes.length-1;si>=0;si--){ const sh=shapes[si];
-    for(let i=0;i<sh.corners.length;i++){ const [sx,sy]=toScr(...sh.corners[i]);
-      if(Math.hypot(sx-px,sy-py)<R_SCREEN) return {si,kind:'corner',i}; }
-    for(let i=0;i<sh.knots.length;i++) for(let k=0;k<sh.knots[i].length;k++){
-      const [sx,sy]=toScr(...sh.knots[i][k]);
-      if(Math.hypot(sx-px,sy-py)<R_SCREEN) return {si,kind:'knot',i,k}; } }
-  return null;
+// ---- drawing ---------------------------------------------------------------
+function drawShapeAnchors(sh, active){
+  const t = TYPES[sh.type];
+  if (active){
+    for (const a of sh.anchors){
+      for (const [hx,hy] of [hIn(a), hOut(a)]){
+        if (Math.abs(hx-a.x) < 0.01 && Math.abs(hy-a.y) < 0.01) continue;
+        ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(hx,hy);
+        ctx.strokeStyle='#8b949e'; ctx.lineWidth=1/view.s; ctx.stroke();
+        ctx.beginPath(); ctx.arc(hx,hy,4/view.s,0,7); ctx.fillStyle='#e6edf3'; ctx.fill();
+      }
+    }
+  }
+  const r = (active ? 5 : 4) / view.s;
+  for (const a of sh.anchors){
+    ctx.fillStyle = active ? t.color : '#c9d1d9';
+    ctx.fillRect(a.x-r, a.y-r, 2*r, 2*r);
+    ctx.strokeStyle='#05070a'; ctx.lineWidth=1.2/view.s;
+    ctx.strokeRect(a.x-r, a.y-r, 2*r, 2*r);
+  }
+  if (sh.closed && sh.anchors.length){
+    const a = sh.anchors[0];
+    ctx.beginPath(); ctx.arc(a.x,a.y,9/view.s,0,7);
+    ctx.strokeStyle='#ffd740'; ctx.lineWidth=1.6/view.s; ctx.stroke();
+  }
 }
-function pickEdge(px,py){          // nearest edge, UNBOUNDED: click anywhere along the real line
-  let best=null,bd=Infinity;
-  shapes.forEach((sh,si)=>{ for(let i=0;i<edgeCount(sh);i++){ const s=sampleEdge(sh,i);
-    for(const [x,y] of s){ const [sx,sy]=toScr(x,y),d=Math.hypot(sx-px,sy-py);
-      if(d<bd){bd=d;best={si,i};} } } });
+
+function drawLabels(){
+  const sh = getShape('pitch');
+  if (!sh || selected !== 'pitch') return;
+  ctx.font = `${11/view.s}px system-ui`; ctx.textAlign='center';
+  TYPES.pitch.labels.forEach((lab,i) => {
+    const pts = sampleEdge(sh,i,24), m = pts[Math.floor(pts.length/2)];
+    const w = ctx.measureText(lab).width / view.s;
+    ctx.fillStyle='#000a'; ctx.fillRect(m[0]-w/2-3/view.s, m[1]-14/view.s, w+6/view.s, 13/view.s);
+    ctx.fillStyle='#40c4ff'; ctx.fillText(lab, m[0], m[1]-4/view.s);
+  });
+  ctx.textAlign='left';
+}
+
+function draw(){
+  ctx.setTransform(1,0,0,1,0,0);
+  ctx.clearRect(0,0,cv.width,cv.height);
+  ctx.setTransform(view.s,0,0,view.s,view.tx,view.ty);
+  if (img.complete && img.naturalWidth) ctx.drawImage(img,0,0);
+  ctx.lineJoin='round'; ctx.lineCap='round';
+
+  for (const sh of shapes){
+    ctx.strokeStyle = TYPES[sh.type].color;
+    ctx.lineWidth = 2.4/view.s;
+    pathThrough(sh.anchors, sh.closed, 24);
+    ctx.stroke();
+    drawShapeAnchors(sh, selected === sh.type);
+  }
+
+  if (drawing){
+    const t = TYPES[drawing.type];
+    if (drawing.anchors.length > 1){
+      ctx.strokeStyle = t.color; ctx.lineWidth = 2.4/view.s;
+      ctx.setLineDash([7/view.s, 5/view.s]);
+      pathThrough(drawing.anchors, false, 24);
+      ctx.stroke(); ctx.setLineDash([]);
+    }
+    for (const a of drawing.anchors){
+      for (const [hx,hy] of [hIn(a), hOut(a)]){
+        if (Math.abs(hx-a.x) < 0.01 && Math.abs(hy-a.y) < 0.01) continue;
+        ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(hx,hy);
+        ctx.strokeStyle='#8b949e'; ctx.lineWidth=1/view.s; ctx.stroke();
+        ctx.beginPath(); ctx.arc(hx,hy,4/view.s,0,7); ctx.fillStyle='#e6edf3'; ctx.fill();
+      }
+    }
+    const r = 5/view.s;
+    for (const a of drawing.anchors){
+      ctx.fillStyle=t.color; ctx.fillRect(a.x-r,a.y-r,2*r,2*r);
+      ctx.strokeStyle='#05070a'; ctx.lineWidth=1.2/view.s;
+      ctx.strokeRect(a.x-r,a.y-r,2*r,2*r);
+    }
+    ctx.setTransform(1,0,0,1,0,0);
+    drawing.anchors.forEach((a,k) => {
+      const [sx,sy] = toScr(a.x,a.y);
+      ctx.beginPath(); ctx.arc(sx,sy,10,0,7); ctx.fillStyle='#ffd740'; ctx.fill();
+      ctx.fillStyle='#111'; ctx.font='bold 12px system-ui';
+      ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillText(String(k+1), sx, sy+0.5);
+    });
+    ctx.textAlign='left'; ctx.textBaseline='alphabetic';
+  }
+
+  drawLabels();
+  updateGuide();
+  syncChips();
+}
+
+// ---- guide / chips ---------------------------------------------------------
+function updateGuide(){
+  guide.style.display = guideVisible ? 'block' : 'none';
+  if (drawing){
+    const t = TYPES[drawing.type], k = drawing.anchors.length;
+    gt.innerHTML = `<span class="n">${t.name}</span> — point ${Math.min(k+1,t.count)} of ${t.count}`;
+    gb.innerHTML = t.hint + (k===0
+      ? ' <span class="k">Tip: drag away from the point you just clicked to set the curve.</span>' : '');
+  } else if (selected && getShape(selected)){
+    gt.innerHTML = `<b>${TYPES[selected].name}</b> traced`;
+    gb.innerHTML = '<b>Drag any line to bend it in place</b> — no new point. Drag the square ' +
+                   'anchors to move them; a round handle bends one side; ' +
+                   '<span class="k">Alt-drag a handle to mirror it (smooth point).</span>';
+  } else {
+    gt.innerHTML = 'Draw the <span class="n">Pitch</span> first';
+    gb.innerHTML = 'Pick <b>Pitch</b> above, then click the four corners in order ' +
+                   '(top-left → top-right → bottom-right → bottom-left). ' +
+                   'Plain clicks stay straight; <b>drag while clicking</b> to curve just that edge. ' +
+                   'Afterwards, <b>drag any line</b> to bend it — no extra point.';
+  }
+  checks.innerHTML = ['pitch','halfway','centre_circle'].map(k => {
+    const done = !!getShape(k);
+    return `<span class="${done?'done':''}"><b>${done?'✓':'–'}</b> ${TYPES[k].name}` +
+           `${k==='pitch'?' (required)':' (optional)'}</span>`;
+  }).join('');
+  hint.textContent = drawing
+    ? `Click point ${Math.min(drawing.anchors.length+1, TYPES[drawing.type].count)}/` +
+      `${TYPES[drawing.type].count} — click-drag to curve this edge · Esc cancels · Backspace removes`
+    : (selected && getShape(selected))
+    ? 'Drag a line to bend it · Drag anchors to move · Alt-drag a handle to mirror · Esc deselects'
+    : 'Click a shape above · Drag a line to bend it · Wheel zooms · Shift-drag pans · ? help';
+}
+
+function syncChips(){
+  document.querySelectorAll('.chip').forEach(chip => {
+    const k = chip.dataset.type, done = !!getShape(k);
+    chip.classList.toggle('done', done);
+    chip.classList.toggle('on', (drawing && drawing.type===k) || selected===k);
+  });
+}
+
+// ---- hit testing -----------------------------------------------------------
+function pickHandle(px,py){
+  const sh = selected ? getShape(selected) : null;
+  if (!sh) return null;
+  let best=null, bd=11;
+  sh.anchors.forEach((a,i) => {
+    const cand = [['in',a.x+a.ix,a.y+a.iy], ['out',a.x+a.ox,a.y+a.oy]];
+    for (const [which,x,y] of cand){
+      if (Math.abs(x-a.x) < 0.01 && Math.abs(y-a.y) < 0.01) continue;
+      const [sx,sy] = toScr(x,y), d = Math.hypot(sx-px, sy-py);
+      if (d < bd){ bd=d; best={type:selected, i, which}; }
+    }
+  });
   return best;
 }
-function insertKnotAt(sh,i,imgPt){
-  const cps=controlPts(sh,i), seg=14, s=catmullRom(cps,seg);
-  let bi=0,bd=1e9; s.forEach((p,j)=>{const d=Math.hypot(p[0]-imgPt[0],p[1]-imgPt[1]); if(d<bd){bd=d;bi=j;}});
-  const a=Math.min(cps.length-2,Math.floor(bi/seg));
-  sh.knots[i].splice(a,0,[imgPt[0],imgPt[1]]); return a;
+function pickAnchor(px,py){
+  const order = [];
+  if (selected && getShape(selected)) order.push(getShape(selected));
+  for (let si=shapes.length-1; si>=0; si--) if (!order.includes(shapes[si])) order.push(shapes[si]);
+  let best=null, bd=11;
+  for (const sh of order) sh.anchors.forEach((a,i) => {
+    const [sx,sy] = toScr(a.x,a.y), d = Math.hypot(sx-px, sy-py);
+    if (d < bd){ bd=d; best={type:sh.type, i}; }
+  });
+  return best;
+}
+function pickSegment(px,py){
+  let best=null, bd=16;
+  for (const sh of shapes){
+    for (let i=0;i<edgeCount(sh);i++){
+      for (const [x,y] of sampleEdge(sh,i,18)){
+        const [sx,sy] = toScr(x,y), d = Math.hypot(sx-px, sy-py);
+        if (d < bd){ bd=d; best={type:sh.type, seg:i}; }
+      }
+    }
+  }
+  return best;
 }
 
-// ---- interaction ----
-function snap(){ history.push(JSON.stringify(shapes)); if(history.length>80) history.shift(); }
+// ---- interaction -----------------------------------------------------------
+function snap(){ history.push(JSON.stringify(shapes)); if (history.length>100) history.shift(); }
 
-cv.addEventListener('pointerdown',e=>{
-  if(e.shiftKey||e.button===1){ panning=[e.clientX,e.clientY,view.tx,view.ty]; return; }
-  const [x,y]=toImg(e.offsetX,e.offsetY);
-  if(tool){
-    pending.push([x,y]);
-    if(pending.length>=TYPES[tool].corners){ snap(); shapes=shapes.filter(s=>s.type!==tool);
-      shapes.push(withDefaults(tool,pending)); pending=[]; setTool(null); }
+function startDrawing(type){
+  drawing = {type, anchors:[]};
+  penDrag = -1; selected = null; guideVisible = true;
+  draw();
+}
+function finishDrawing(){
+  if (!drawing) return;
+  const type = drawing.type;
+  snap();
+  shapes = shapes.filter(s => s.type !== type);
+  shapes.push({type, anchors:drawing.anchors, closed:TYPES[type].closed});
+  selected = type; drawing = null; penDrag = -1; guideVisible = false;
+  draw();
+}
+
+cv.addEventListener('pointerdown', e => {
+  if (e.shiftKey || e.button===1){
+    panning = {x:e.clientX, y:e.clientY, tx:view.tx, ty:view.ty};
+    cv.setPointerCapture(e.pointerId); cv.style.cursor='grabbing'; return;
+  }
+  if (e.button !== 0) return;
+  const [x,y] = toImg(e.offsetX, e.offsetY);
+
+  if (drawing){
+    if (drawing.anchors.length === 0) guideVisible = false;
+    drawing.anchors.push(newAnchor(x,y));
+    penDrag = drawing.anchors.length - 1;
+    cv.setPointerCapture(e.pointerId);
     draw(); return;
   }
-  const hit=pickPoint(e.offsetX,e.offsetY);
-  if(hit){
-    if(e.altKey && hit.kind==='knot'){ snap(); shapes[hit.si].knots[hit.i].splice(hit.k,1); draw(); return; }
-    snap(); cv.setPointerCapture(e.pointerId); drag=hit; return;
+
+  const hh = pickHandle(e.offsetX, e.offsetY);
+  if (hh){ snap(); cv.setPointerCapture(e.pointerId); drag = {kind:'handle', ...hh}; return; }
+
+  const ah = pickAnchor(e.offsetX, e.offsetY);
+  if (ah){
+    selected = ah.type; snap();
+    cv.setPointerCapture(e.pointerId); drag = {kind:'anchor', ...ah}; draw(); return;
   }
-  const ed=pickEdge(e.offsetX,e.offsetY);            // click the real line -> point added & bent at once
-  if(ed){ snap(); const k=insertKnotAt(shapes[ed.si],ed.i,[x,y]);
-    cv.setPointerCapture(e.pointerId); drag={si:ed.si,kind:'knot',i:ed.i,k}; draw(); }
+
+  const sg = pickSegment(e.offsetX, e.offsetY);
+  if (sg){
+    const shp = getShape(sg.type), n = shp.anchors.length;
+    const a = shp.anchors[sg.seg], b = shp.anchors[(sg.seg+1)%n];
+    selected = sg.type; snap();
+    drag = {kind:'bend', type:sg.type, seg:sg.seg, x0:x, y0:y,
+            aox:a.ox, aoy:a.oy, bix:b.ix, biy:b.iy};
+    cv.setPointerCapture(e.pointerId); draw(); return;
+  }
+  selected = null; draw();
 });
-cv.addEventListener('pointermove',e=>{
-  if(panning){ view.tx=panning[2]+(e.clientX-panning[0]); view.ty=panning[3]+(e.clientY-panning[1]); draw(); return; }
-  if(drag){ const [x,y]=toImg(e.offsetX,e.offsetY), sh=shapes[drag.si];
-    if(drag.kind==='corner') sh.corners[drag.i]=[x,y]; else sh.knots[drag.i][drag.k]=[x,y]; draw(); }
+
+cv.addEventListener('pointermove', e => {
+  if (panning){
+    view.tx = panning.tx + (e.clientX-panning.x);
+    view.ty = panning.ty + (e.clientY-panning.y);
+    draw(); return;
+  }
+  const [x,y] = toImg(e.offsetX, e.offsetY);
+
+  if (penDrag >= 0 && drawing){
+    const a = drawing.anchors[penDrag];
+    a.ox = x-a.x; a.oy = y-a.y;            // curve only the edge that starts here
+    draw(); return;
+  }
+  if (drag && drag.kind === 'bend'){
+    const sh = getShape(drag.type); if (!sh) return;
+    const n = sh.anchors.length;
+    const a = sh.anchors[drag.seg], b = sh.anchors[(drag.seg+1)%n];
+    a.ox = drag.aox + (x-drag.x0); a.oy = drag.aoy + (y-drag.y0);
+    b.ix = drag.bix + (x-drag.x0); b.iy = drag.biy + (y-drag.y0);
+    draw(); return;
+  }
+  if (drag){
+    const sh = getShape(drag.type); if (!sh) return;
+    const a = sh.anchors[drag.i];
+    if (drag.kind === 'anchor'){ a.x = x; a.y = y; }
+    else if (drag.which === 'out'){
+      a.ox = x-a.x; a.oy = y-a.y;
+      if (e.altKey){ a.ix = -a.ox; a.iy = -a.oy; }
+    } else {
+      a.ix = x-a.x; a.iy = y-a.y;
+      if (e.altKey){ a.ox = -a.ix; a.oy = -a.iy; }
+    }
+    draw(); return;
+  }
+  const overPoint = pickHandle(e.offsetX,e.offsetY) || pickAnchor(e.offsetX,e.offsetY);
+  cv.style.cursor = drawing ? 'crosshair'
+    : overPoint ? 'move'
+    : pickSegment(e.offsetX,e.offsetY) ? 'grab' : 'default';
 });
-const endDrag=()=>drag=null;
-cv.addEventListener('pointerup',endDrag);
-cv.addEventListener('pointercancel',endDrag);
-cv.addEventListener('wheel',e=>{ e.preventDefault();
-  const f=e.deltaY<0?1.15:1/1.15,[ix,iy]=toImg(e.offsetX,e.offsetY);
-  view.s*=f; view.tx=e.offsetX-ix*view.s; view.ty=e.offsetY-iy*view.s; draw(); },{passive:false});
-window.addEventListener('mouseup',()=>panning=null);
-window.addEventListener('keydown',e=>{ if(e.key==='Escape'){ pending=[]; setTool(null); draw(); }
-  else if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'){ e.preventDefault(); undo(); } });
 
-function setTool(t){ tool=t;
-  for(const k of Object.keys(TYPES)) document.getElementById('t_'+k).classList.toggle('on',k===t);
-  if(t) pending=[]; draw(); }
-for(const k of Object.keys(TYPES)) document.getElementById('t_'+k).onclick=()=>setTool(tool===k?null:k);
+cv.addEventListener('pointerup', e => {
+  if (penDrag >= 0 && drawing){
+    penDrag = -1;
+    if (drawing.anchors.length >= TYPES[drawing.type].count) finishDrawing();
+    else draw();
+    return;
+  }
+  drag = null; panning = null;
+  cv.style.cursor = 'default';
+});
+cv.addEventListener('pointercancel', () => { drag = null; panning = null; penDrag = -1; });
 
-function undo(){ if(pending.length){ pending.pop(); draw(); return; } if(history.length) shapes=JSON.parse(history.pop()); draw(); }
-document.getElementById('undo').onclick=undo;
-document.getElementById('clearall').onclick=()=>{ if(confirm('Clear all shapes?')){ snap(); shapes=[];pending=[];setTool(null);draw(); } };
-document.getElementById('fit').onclick=fit;
+cv.addEventListener('wheel', e => {
+  e.preventDefault();
+  const f = e.deltaY < 0 ? 1.15 : 1/1.15, [ix,iy] = toImg(e.offsetX, e.offsetY);
+  view.s *= f; view.tx = e.offsetX - ix*view.s; view.ty = e.offsetY - iy*view.s;
+  draw();
+}, {passive:false});
 
-document.getElementById('save').onclick=()=>{
-  const lines=[]; const add=(label,pts)=>lines.push({label,points:pts.map(p=>[+p[0].toFixed(1),+p[1].toFixed(1)])});
-  const ps=shapes.find(s=>s.type==='pitch');
-  if(ps) TYPES.pitch.edgeLabels.forEach((lab,i)=>add(lab,sampleEdge(ps,i,24)));
-  for(const t of ['goal_left','goal_right']){ const sh=shapes.find(s=>s.type===t); if(!sh) continue;
-    const whole=[]; for(let i=0;i<edgeCount(sh);i++) whole.push(...sampleEdge(sh,i,16)); add(t,whole);
-    add(t==='goal_left'?'goal_line_left':'goal_line_right', sampleEdge(sh,2,24)); }   // edge 2 = goal line on grass
-  const hs=shapes.find(s=>s.type==='halfway'); if(hs) add('halfway', sampleEdge(hs,0,24));
+window.addEventListener('keydown', e => {
+  const tag = ((e.target && e.target.tagName) || '').toLowerCase();
+  if (tag === 'input' || tag === 'select' || tag === 'textarea') return;
+  if (e.key === 'Escape'){
+    if (drawing){ drawing = null; penDrag = -1; }
+    else selected = null;
+    draw();
+  } else if (e.key === 'Backspace' || e.key === 'Delete'){
+    if (drawing && drawing.anchors.length){
+      e.preventDefault(); drawing.anchors.pop(); penDrag = -1; draw();
+    }
+  } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z'){
+    e.preventDefault(); undo();
+  }
+});
 
-  if(!lines.length){ alert('Nothing to save — draw at least the pitch.'); return; }
-  const data={ image:img.dataset.name||'frame.jpg', size:[img.naturalWidth,img.naturalHeight],
-    span:180, crop:null, pitch:Object.assign({},pitch,{length:+plen.value,width:+pwid.value}), lines };
-  const blob=new Blob([JSON.stringify(data,null,1)],{type:'application/json'});
-  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='calib_equirect.json'; a.click();
+function undo(){
+  if (drawing){
+    if (drawing.anchors.length){ drawing.anchors.pop(); penDrag = -1; }
+    else drawing = null;
+    draw(); return;
+  }
+  if (history.length){
+    shapes = JSON.parse(history.pop());
+    if (selected && !getShape(selected)) selected = null;
+    draw();
+  }
+}
+
+// ---- toolbar ---------------------------------------------------------------
+document.querySelectorAll('.chip').forEach(chip => {
+  const type = chip.dataset.type;
+  chip.addEventListener('click', e => {
+    if (e.target.classList.contains('x')){
+      e.stopPropagation();
+      snap();
+      shapes = shapes.filter(s => s.type !== type);
+      if (selected === type) selected = null;
+      if (drawing && drawing.type === type) drawing = null;
+      draw(); return;
+    }
+    if (drawing && drawing.type === type) return;
+    if (getShape(type)){ drawing = null; selected = type; draw(); }
+    else startDrawing(type);
+  });
+});
+
+$('undo').onclick = undo;
+$('fit').onclick = fit;
+$('helpBtn').onclick = () => { guideVisible = !guideVisible; draw(); };
+$('clearall').onclick = () => {
+  if (confirm('Clear all shapes?')){ snap(); shapes = []; selected = null; drawing = null; draw(); }
 };
-document.getElementById('file').onchange=e=>{const f=e.target.files[0]; if(!f)return;
-  const n=new Image(); n.dataset.name=f.name; n.onload=fit; n.src=URL.createObjectURL(f);
-  img=n; shapes=[]; history=[]; pending=[]; setTool(null); };
-img.dataset.name='frame_85s.jpg'; img.onload=fit;
-img.onerror=()=>{info.textContent='load an equirect frame with the file picker';};
-img.src='frame_85s.jpg';
-window.addEventListener('resize',()=>{resize();draw();});
-setTool(null); resize(); draw();
+$('openBtn').onclick = () => $('file').click();
+$('file').onchange = e => {
+  const f = e.target.files[0]; if (!f) return;
+  const n = new Image(); n.dataset.name = f.name;
+  n.onload = () => { img = n; shapes = []; history = []; selected = null; drawing = null; fit(); };
+  n.onerror = () => { gb.textContent = 'Could not read that image file.'; };
+  n.src = URL.createObjectURL(f);
+};
+
+// ---- save / calibrate ------------------------------------------------------
+$('save').textContent = QP.get('api') ? 'Calibrate' : 'Save trace';
+
+$('save').onclick = async () => {
+  const ps = getShape('pitch');
+  if (!ps){ alert('Trace the pitch first — it is required for calibration.'); return; }
+
+  const lines = [];
+  const add = (label, pts) => lines.push({
+    label, points: pts.map(p => [+p[0].toFixed(1), +p[1].toFixed(1)]) });
+  TYPES.pitch.labels.forEach((lab,i) => add(lab, sampleEdge(ps,i,24)));
+  const hs = getShape('halfway');
+  if (hs) add('halfway', sampleEdge(hs,0,24));
+  const cc = getShape('centre_circle');
+  if (cc){
+    const whole = [];
+    for (let i=0;i<edgeCount(cc);i++) whole.push(...sampleEdge(cc,i,16));
+    add('centre_circle', whole);
+  }
+
+  const data = {
+    image: img.dataset.name || 'frame.jpg',
+    size: [img.naturalWidth, img.naturalHeight],
+    span: 180, crop: null,
+    pitch: Object.assign({}, pitch, {length:+plen.value, width:+pwid.value}),
+    lines
+  };
+
+  const api = QP.get('api');
+  if (!api){                                   // standalone: download the trace
+    const blob = new Blob([JSON.stringify(data,null,1)], {type:'application/json'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = 'calib_equirect.json'; a.click();
+    return;
+  }
+
+  const btn = $('save'), old = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Calibrating…';
+  try {
+    const r = await fetch(api.replace(/\/$/,'') + '/api/calibrate', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({video_id: QP.get('video_id'), trace: data}) });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || ('HTTP '+r.status));
+    const q = j.quality || {};
+    const msg = `Calibrated — median ${q.med_m} m · valid=${q.valid} · corners ${q.corners_in_frame}/4`;
+    gb.textContent = msg;
+    if (window.parent !== window)
+      window.parent.postMessage({type:'gh-calibrated', quality:q}, '*');
+    else alert(msg);
+  } catch (err){
+    alert('Calibration failed: ' + err.message);
+  } finally {
+    btn.disabled = false; btn.textContent = old;
+  }
+};
+
+// ---- boot ------------------------------------------------------------------
+const qimg = QP.get('img');
+img.dataset.name = qimg ? qimg.split('/').pop() : 'frame_85s.jpg';
+img.onload = fit;
+img.onerror = () => { gb.textContent = 'No frame loaded — use “Open frame”.'; };
+img.src = qimg || 'frame_85s.jpg';
+
+window.addEventListener('resize', () => { resize(); draw(); });
+resize(); draw();
 </script></body></html>

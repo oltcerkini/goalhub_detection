@@ -25,3 +25,17 @@ youtube_matches_1080p/
 
 # VR180 outputs
 out/
+
+# VR180 app runtime data (uploads/outputs can be GBs)
+app_data180/
+calib/_demo_*
+
+# Large model binaries / datasets
+ball_dataset/
+*.engine
+*.onnx
+annotation/frames/
+
+# UI walkthrough / probe artifacts
+screenshots/
+equirect_test/*.png

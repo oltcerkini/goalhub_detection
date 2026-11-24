@@ -9,14 +9,17 @@ a player is briefly occluded or the detector misses them for a few frames.
 import cv2
 import numpy as np
 import supervision as sv
+from supervision.tracker.byte_tracker.core import TrackState
 
 
 class PlayerTracker:
     """ByteTrack + appearance ReID wrapper that preserves IDs across gaps."""
 
     def __init__(self, max_missed=60, proximity_px=200,
-                 appearance_threshold=0.45, match_distance_weight=0.4):
-        self.byte_track = sv.ByteTrack()
+                 appearance_threshold=0.45, match_distance_weight=0.4,
+                 track_activation_threshold=0.25):
+        self.byte_track = sv.ByteTrack(
+            track_activation_threshold=track_activation_threshold)
         self._tracks = {}
         self._byte_to_stable = {}
         self._next_id = 1
@@ -29,12 +32,15 @@ class PlayerTracker:
 
     # ── Public API ──────────────────────────────────────────────────────────
 
-    def update(self, detections, frame=None):
+    def update(self, detections, frame=None, strict_iou=True):
         """Run tracking + re-identification.
 
         Args:
             detections: sv.Detections (xyxy, confidence, class_id)
             frame: optional BGR frame — needed for appearance extraction.
+            strict_iou: keep supervision's legacy behaviour (re-match detections
+                to tracks at IoU 0.5, dropping unmatched boxes). Set False for
+                small/far boxes, where that re-match silently drops valid players.
 
         Returns:
             sv.Detections with stable tracker_id.
@@ -45,7 +51,10 @@ class PlayerTracker:
             self._age_tracks()
             return detections
 
-        tracked = self.byte_track.update_with_detections(detections)
+        if strict_iou:
+            tracked = self.byte_track.update_with_detections(detections)
+        else:
+            tracked = self._update_tracks(detections)
         if tracked is None or len(tracked) == 0:
             self._age_tracks()
             return tracked
@@ -97,6 +106,34 @@ class PlayerTracker:
 
         tracked.tracker_id = np.array(stable_ids, dtype=int)
         return tracked
+
+    def _update_tracks(self, detections):
+        """ByteTrack without the IoU-0.5 re-match (see update(strict_iou=...)).
+
+        Returns one row per active track; a small far-player box whose Kalman
+        prediction shifted a couple of pixels is no longer thrown away.
+        """
+        tensors = np.hstack((detections.xyxy,
+                             np.asarray(detections.confidence, float)[:, None]))
+        tracks = self.byte_track.update_with_tensors(tensors)
+        # ByteTrack emits a brand-new track only after its SECOND match
+        # (`is_activated` stays False on the first frame). A far player detected
+        # intermittently therefore never gets emitted. Include the unconfirmed
+        # tracks created on THIS frame — they are valid current detections.
+        cur = self.byte_track.frame_id
+        pending = [t for t in self.byte_track.tracked_tracks
+                   if not t.is_activated and t.state == TrackState.Tracked
+                   and t.frame_id == cur]
+        seen = {int(t.external_track_id) for t in tracks}
+        all_tracks = list(tracks) + [t for t in pending
+                                     if int(t.external_track_id) not in seen]
+        if not all_tracks:
+            return sv.Detections.empty()
+        xyxy = np.asarray([t.tlbr for t in all_tracks], float)
+        conf = np.asarray([float(getattr(t, "score", 1.0)) for t in all_tracks], float)
+        tids = np.asarray([int(t.external_track_id) for t in all_tracks], int)
+        return sv.Detections(xyxy=xyxy, confidence=conf,
+                             class_id=np.zeros(len(all_tracks), int), tracker_id=tids)
 
     # ── Appearance feature extraction ────────────────────────────────────────
 

@@ -8,10 +8,10 @@
     1586
   ],
   "content_region": null,
-  "source_image": "synthetic",
+  "source_image": "frame_85s.jpg",
   "pitch": {
-    "length": 105.0,
-    "width": 68.0,
+    "length": 105,
+    "width": 68,
     "penalty_depth": 16.5,
     "penalty_half": 20.16,
     "circle_r": 9.15,
@@ -20,57 +20,60 @@
   },
   "camera_pose": {
     "position_m": [
-      25.475872010334065,
-      9.486940565266401,
-      -57.78977749433699
+      0.5901783951498872,
+      5.321474924440395,
+      33.56034358428267
     ],
     "rotation_vector": [
-      0.3129083352013848,
-      1.090893190837748,
-      0.12374289187066681
+      0.09646081341531325,
+      -3.0763249023309807,
+      0.34769278924388747
     ],
     "R": [
       [
-        0.4599962630832709,
-        0.054362699793239586,
-        0.886255118360744
+        -0.997085507347909,
+        -0.06678813318708919,
+        -0.036875958321742106
       ],
       [
-        0.25148784324786,
-        0.9492754596042101,
-        -0.18875901698132314
+        -0.05687288847976031,
+        0.9728722421416247,
+        -0.22424333886717054
       ],
       [
-        -0.8515616845819015,
-        0.3097108307186007,
-        0.4229916059304585
+        0.05085239023617251,
+        -0.22149254103854507,
+        -0.9738352471910003
       ]
     ]
   },
   "traced_features": {
     "labels": [
-      "centre_circle",
+      "goal_line_left",
       "goal_line_right",
       "halfway",
-      "penalty_box_right",
       "touchline_far",
       "touchline_near"
     ],
     "points_per_label": {
-      "touchline_near": 18,
-      "touchline_far": 12,
-      "goal_line_right": 25,
-      "halfway": 18,
-      "penalty_box_right": 4,
-      "centre_circle": 13
-    }
+      "touchline_far": 25,
+      "goal_line_right": 48,
+      "touchline_near": 87,
+      "goal_line_left": 48,
+      "halfway": 25
+    },
+    "label_parity": "goal_lines_flipped"
   },
   "quality": {
-    "med_m": 0.4360460406462714,
-    "rms_m": 1.395810572823396,
-    "rms_px": 9.515570909792391,
-    "n_points": 90,
+    "med_m": 0.8160003654174304,
+    "rms_m": 6.820111544243873,
+    "rms_px": 174.7937968939668,
+    "n_points": 233,
     "valid": true,
-    "valid_threshold_m": 1.0
+    "valid_threshold_m": 1.0,
+    "suspect_labels": [
+      "touchline_far"
+    ],
+    "corners_in_frame": 4
   }
 }

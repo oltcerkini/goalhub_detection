@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GoalHub 180</title>
+<style>
+  :root{--bg:#0f1319;--panel:#171d26;--line:#28313d;--fg:#e6edf3;--mut:#8b98a6;--acc:#40c4ff;--ok:#3ddc84;--warn:#ffb020}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,Segoe UI,Roboto,sans-serif}
+  header{padding:14px 20px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:12px}
+  header h1{font-size:16px;margin:0;font-weight:600}
+  header .tag{color:var(--mut);font-size:12px}
+  main{padding:20px;max-width:1500px;margin:0 auto}
+  .step{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:16px}
+  .step h2{font-size:14px;margin:0 0 10px;font-weight:600}
+  .step .n{display:inline-block;width:20px;height:20px;line-height:20px;text-align:center;border-radius:50%;
+           background:var(--acc);color:#05131c;font-size:12px;font-weight:700;margin-right:8px}
+  button{background:var(--acc);color:#05131c;border:0;border-radius:7px;padding:9px 16px;font-weight:600;cursor:pointer}
+  button:disabled{background:#2b3542;color:#6b7787;cursor:not-allowed}
+  input[type=file]{color:var(--fg)}
+  input[type=number],input[type=text]{background:#0d1117;border:1px solid var(--line);color:var(--fg);border-radius:6px;padding:6px 8px;width:90px}
+  label{color:var(--mut);margin-right:6px}
+  .row{display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+  .mut{color:var(--mut)}
+  #toolWrap{display:none;height:70vh;min-height:520px;border:1px solid var(--line);border-radius:8px;overflow:hidden;margin-top:12px}
+  #tool{width:100%;height:100%;border:0;background:#0b0f15}
+  .status{margin-top:10px;font-size:13px}
+  .ok{color:var(--ok)} .warn{color:var(--warn)} .err{color:#ff6b6b}
+  table{width:100%;border-collapse:collapse;margin-top:10px;font-size:13px}
+  th,td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:left}
+  th{color:var(--mut);font-weight:500}
+  .pill{display:inline-block;background:#1d2733;border:1px solid var(--line);border-radius:20px;padding:2px 10px;margin-right:6px;font-size:12px}
+</style>
+</head>
+<body>
+<header>
+  <h1>GoalHub 180</h1><span class="tag">VR180 · upload → calibrate → detect players</span>
+</header>
+<main>
+
+  <div class="step">
+    <h2><span class="n">1</span>Upload a 180° video</h2>
+    <div class="row">
+      <input type="file" id="file" accept="video/*">
+      <label>frame at</label><input type="number" id="frameIdx" value="240" title="which frame to trace on">
+      <button id="uploadBtn" disabled>Upload</button>
+      <span id="upStatus" class="mut"></span>
+    </div>
+  </div>
+
+  <div class="step" id="step2" style="opacity:.45">
+    <h2><span class="n">2</span>Trace the pitch with the pen</h2>
+    <div class="mut">Pick <b>Pitch</b>, then click the four corners (top-left → top-right → bottom-right → bottom-left).
+      Plain clicks stay straight; <b>drag while clicking</b> to curve just that edge. Afterwards, <b>drag any line</b>
+      to bend it in place — no new point. Add <b>Halfway</b> and <b>Centre circle</b> if visible
+      (the centre circle helps most), then press <b>Calibrate</b>.</div>
+    <div id="toolWrap"><iframe id="tool"></iframe></div>
+  </div>
+
+  <div class="step" id="step3" style="opacity:.45">
+    <h2><span class="n">3</span>Detect players</h2>
+    <div class="mut">Only people whose feet are on the traced pitch are kept — spectators and the sideline are filtered out.</div>
+    <div class="row">
+      <label>start (s)</label><input type="number" id="startS" value="0" step="1">
+      <label>frames</label><input type="number" id="numFrames" value="300" title="blank = whole video">
+      <button id="runBtn" disabled>Detect players</button>
+      <span id="runStatus" class="mut"></span>
+    </div>
+    <div id="out"></div>
+  </div>
+
+</main>
+<script>
+const $=id=>document.getElementById(id);
+let video_id=null, video_name=null, calibrated=false;
+
+$('file').onchange=()=>{ $('uploadBtn').disabled=!$('file').files.length; };
+
+$('uploadBtn').onclick=async()=>{
+  const f=$('file').files[0]; if(!f) return;
+  $('uploadBtn').disabled=true; $('upStatus').textContent='uploading…';
+  const fd=new FormData(); fd.append('file',f); fd.append('frame',$('frameIdx').value||'240');
+  try{
+    const r=await fetch('/api/upload',{method:'POST',body:fd}); const j=await r.json();
+    if(!r.ok) throw new Error(j.detail||('HTTP '+r.status));
+    video_id=j.video_id; video_name=j.video_name;
+    $('upStatus').innerHTML=`<span class="pill">${j.width}×${j.height}</span><span class="pill">layout ${j.layout}</span>`;
+    // embed the tracing tool, pointed at the uploaded frame and this app
+    const q=new URLSearchParams({img:j.frame_url, video_id:j.video_id, api:location.origin, v:Date.now()});
+    $('tool').src='/calib/tool?'+q.toString();
+    $('toolWrap').style.display='block';
+    $('step2').style.opacity=1;
+  }catch(e){ $('upStatus').innerHTML='<span class="err">'+e.message+'</span>'; }
+  $('uploadBtn').disabled=false;
+};
+
+window.addEventListener('message',ev=>{
+  if(!ev.data||ev.data.type!=='gh-calibrated') return;
+  calibrated=true; $('step3').style.opacity=1; $('runBtn').disabled=false;
+  const q=ev.data.quality||{}, valid=q.valid!==false;
+  $('upStatus').innerHTML+=`<div class="status ${valid?'ok':'warn'}">Calibrated — median ${q.med_m} m · valid=${q.valid} · corners ${q.corners_in_frame}/4${valid?'':' — adjust the trace if possible'}</div>`;
+});
+
+$('runBtn').onclick=async()=>{
+  if(!calibrated) return;
+  $('runBtn').disabled=true; $('runStatus').textContent='starting…'; $('out').innerHTML='';
+  const body={video_id, video_name, start:parseFloat($('startS').value||'0')};
+  const nf=parseInt($('numFrames').value); if(nf) body.frames=nf;
+  try{
+    const r=await fetch('/api/process',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const j=await r.json(); if(!r.ok) throw new Error(j.detail||('HTTP '+r.status));
+    poll(j.task_id);
+  }catch(e){ $('runStatus').innerHTML='<span class="err">'+e.message+'</span>'; $('runBtn').disabled=false; }
+};
+
+async function poll(id){
+  const t0=Date.now();
+  while(true){
+    await new Promise(s=>setTimeout(s,2000));
+    const j=await (await fetch('/api/status/'+id)).json();
+    $('runStatus').textContent=`${j.status}… (${Math.round((Date.now()-t0)/1000)}s)`;
+    if(j.status==='completed'){ showResults(id); return; }
+    if(j.status==='error'){ $('runStatus').innerHTML='<span class="err">'+(j.error||'failed')+'</span>'; $('runBtn').disabled=false; return; }
+  }
+}
+
+async function showResults(id){
+  const res=await (await fetch('/api/results/'+id)).json();
+  const fr=res.frames||[];
+  $('runStatus').innerHTML=`<span class="ok">done</span> — ${fr.length} frames, ${res.image_size?res.image_size.join('×'):''}`;
+  let rows='';
+  fr.slice(0,60).forEach((f,i)=>{
+    const ps=f.players||[];
+    const first=(ps[0]&&ps[0].pitch_m)?`x ${ps[0].pitch_m[0].toFixed(1)}, z ${ps[0].pitch_m[1].toFixed(1)}`:'—';
+    rows+=`<tr><td>${i+1}</td><td>${(f.t||0).toFixed(2)}s</td><td>${ps.length}</td><td>${first}</td></tr>`;
+  });
+  $('out').innerHTML=
+    `<video src="/api/video/${id}" controls autoplay loop muted playsinline
+       style="width:100%;max-width:1200px;border-radius:8px;border:1px solid var(--line);margin-top:12px;background:#000"></video>`+
+    `<div class="mut" style="margin-top:6px">annotated video — every player boxed with its track id and pitch position (m)</div>`+
+    `<table><tr><th>#</th><th>time</th><th>players</th><th>first player pitch (m)</th></tr>${rows}</table>`+
+    (fr.length>60?`<div class="mut" style="margin-top:6px">showing first 60 of ${fr.length}</div>`:'');
+  $('runBtn').disabled=false;
+}
+</script>
+</body>
+</html>
