@@ -9,7 +9,7 @@ import cv2
 
 
 def equirect_to_perspective(equirect_img, yaw_deg, pitch_deg, fov_deg, out_w, out_h,
-                            h_span_deg=360.0):
+                            h_span_deg=360.0, v_span_deg=180.0):
     """Reproject an equirectangular frame to a flat perspective (pinhole) view.
 
     CONVENTION
@@ -43,6 +43,9 @@ def equirect_to_perspective(equirect_img, yaw_deg, pitch_deg, fov_deg, out_w, ou
     fov_deg      : horizontal field of view of the output
     out_w, out_h : output resolution
     h_span_deg   : yaw scope of the source frame (360.0 full sphere / 180.0 VR180)
+    v_span_deg   : pitch scope covered by the full image HEIGHT. 180 for a full
+                   equirect; use the camera's real vertical FOV for a vertically
+                   letterboxed/cropped strip (e.g. 3621x796 content -> ~40 deg).
 
     Returns
     -------
@@ -89,7 +92,7 @@ def equirect_to_perspective(equirect_img, yaw_deg, pitch_deg, fov_deg, out_w, ou
     # --- Spherical -> equirect pixel coordinates ---
     # yaw 0 -> W/2 ; +yaw -> +x.  pitch +up -> smaller y (toward top).
     map_x = ((np.degrees(ray_yaw) / h_span_deg) + 0.5) * W
-    map_y = (0.5 - np.degrees(ray_pitch) / 180.0) * H
+    map_y = (0.5 - np.degrees(ray_pitch) / v_span_deg) * H
     map_x = map_x.astype(np.float32)
     map_y = map_y.astype(np.float32)
 

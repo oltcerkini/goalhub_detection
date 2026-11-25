@@ -1,0 +1,311 @@
+{
+  "clip": "barca_goals",
+  "annotations": [
+    {
+      "frame": 0,
+      "dual": true,
+      "candidate": null,
+      "label": {
+        "x": 1350.3967784904619,
+        "y": 1038.429824500019,
+        "vis4k": false,
+        "vis1024": false,
+        "conf4k": 0,
+        "conf1024": 0,
+        "occluded": false,
+        "moving": false,
+        "none": false,
+        "third": ""
+      }
+    },
+    {
+      "frame": 1,
+      "dual": false,
+      "candidate": null,
+      "label": {
+        "x": 1462.4901609172705,
+        "y": 1053.1694199295916,
+        "vis4k": false,
+        "vis1024": false,
+        "conf4k": 0,
+        "conf1024": 0,
+        "occluded": false,
+        "moving": false,
+        "none": false,
+        "third": ""
+      }
+    },
+    {
+      "frame": 2,
+      "dual": false,
+      "candidate": null,
+      "label": {
+        "x": 1664.2169429856062,
+        "y": 1041.3161127215606,
+        "vis4k": false,
+        "vis1024": false,
+        "conf4k": 0,
+        "conf1024": 0,
+        "occluded": false,
+        "moving": false,
+        "none": false,
+        "third": ""
+      }
+    },
+    {
+      "frame": 3,
+      "dual": false,
+      "candidate": null,
+      "label": {
+        "x": 2328.593687287298,
+        "y": 1044.9215708370039,
+        "vis4k": false,
+        "vis1024": false,
+        "conf4k": 0,
+        "conf1024": 0,
+        "occluded": false,
+        "moving": false,
+        "none": false,
+        "third": ""
+      }
+    },
+    {
+      "frame": 4,
+      "dual": false,
+      "candidate": null,
+      "label": {
+        "x": null,
+        "y": null,
+        "vis4k": false,
+        "vis1024": false,
+        "conf4k": 0,
+        "conf1024": 0,
+        "occluded": false,
+        "moving": false,
+        "none": false,
+        "third": ""
+      }
+    },
+    {
+      "frame": 5,
+      "dual": true,
+      "candidate": null,
+      "label": {
+        "x": 2802.1071481276053,
+        "y": 1043.0745172743948,
+        "vis4k": false,
+        "vis1024": false,
+        "conf4k": 0,
+        "conf1024": 0,
+        "occluded": false,
+        "moving": false,
+        "none": false,
+        "third": ""
+      }
+    },
+    {
+      "frame": 6,
+      "dual": false,
+      "candidate": null,
+      "label": {
+        "x": null,
+        "y": null,
+        "vis4k": false,
+        "vis1024": false,
+        "conf4k": 0,
+        "conf1024": 0,
+        "occluded": false,
+        "moving": false,
+        "none": false,
+        "third": ""
+      }
+    },
+    {
+      "frame": 7,
+      "dual": false,
+      "candidate": null,
+      "label": {
+        "x": 3146.4353476625683,
+        "y": 1074.1476841047083,
+        "vis4k": false,
+        "vis1024": false,
+        "conf4k": 0,
+        "conf1024": 0,
+        "occluded": false,
+        "moving": false,
+        "none": false,
+        "third": ""
+      }
+    },
+    {
+      "frame": 8,
+      "dual": false,
+      "candidate": null,
+      "label": {
+        "x": null,
+        "y": null,
+        "vis4k": false,
+        "vis1024": false,
+        "conf4k": 0,
+        "conf1024": 0,
+        "occluded": false,
+        "moving": false,
+        "none": false,
+        "third": ""
+      }
+    },
+    {
+      "frame": 9,
+      "dual": false,
+      "candidate": null,
+      "label": {
+        "x": null,
+        "y": null,
+        "vis4k": false,
+        "vis1024": false,
+        "conf4k": 0,
+        "conf1024": 0,
+        "occluded": false,
+        "moving": false,
+        "none": false,
+        "third": ""
+      }
+    },
+    {
+      "frame": 10,
+      "dual": true,
+      "candidate": null,
+      "label": {
+        "x": null,
+        "y": null,
+        "vis4k": false,
+        "vis1024": false,
+        "conf4k": 0,
+        "conf1024": 0,
+        "occluded": false,
+        "moving": false,
+        "none": false,
+        "third": ""
+      }
+    },
+    {
+      "frame": 11,
+      "dual": false,
+      "candidate": null,
+      "label": {
+        "x": null,
+        "y": null,
+        "vis4k": false,
+        "vis1024": false,
+        "conf4k": 0,
+        "conf1024": 0,
+        "occluded": false,
+        "moving": false,
+        "none": false,
+        "third": ""
+      }
+    },
+    {
+      "frame": 12,
+      "dual": false,
+      "candidate": null,
+      "label": {
+        "x": 1851.4821370738089,
+        "y": 1055.2234542032509,
+        "vis4k": false,
+        "vis1024": false,
+        "conf4k": 0,
+        "conf1024": 0,
+        "occluded": false,
+        "moving": false,
+        "none": false,
+        "third": ""
+      }
+    },
+    {
+      "frame": 13,
+      "dual": false,
+      "candidate": null,
+      "label": {
+        "x": null,
+        "y": null,
+        "vis4k": false,
+        "vis1024": false,
+        "conf4k": 0,
+        "conf1024": 0,
+        "occluded": false,
+        "moving": false,
+        "none": false,
+        "third": ""
+      }
+    },
+    {
+      "frame": 14,
+      "dual": false,
+      "candidate": null,
+      "label": {
+        "x": 1519.419522913048,
+        "y": 1092.7283340253525,
+        "vis4k": false,
+        "vis1024": false,
+        "conf4k": 0,
+        "conf1024": 0,
+        "occluded": false,
+        "moving": false,
+        "none": false,
+        "third": ""
+      }
+    },
+    {
+      "frame": 15,
+      "dual": true,
+      "candidate": null,
+      "label": {
+        "x": null,
+        "y": null,
+        "vis4k": false,
+        "vis1024": false,
+        "conf4k": 0,
+        "conf1024": 0,
+        "occluded": false,
+        "moving": false,
+        "none": false,
+        "third": ""
+      }
+    },
+    {
+      "frame": 16,
+      "dual": false,
+      "candidate": null,
+      "label": {
+        "x": null,
+        "y": null,
+        "vis4k": false,
+        "vis1024": false,
+        "conf4k": 0,
+        "conf1024": 0,
+        "occluded": false,
+        "moving": false,
+        "none": false,
+        "third": ""
+      }
+    },
+    {
+      "frame": 17,
+      "dual": false,
+      "candidate": null,
+      "label": {
+        "x": 2895.826369911804,
+        "y": 1078.4442800831475,
+        "vis4k": false,
+        "vis1024": false,
+        "conf4k": 0,
+        "conf1024": 0,
+        "occluded": false,
+        "moving": false,
+        "none": false,
+        "third": ""
+      }
+    }
+  ]
+}

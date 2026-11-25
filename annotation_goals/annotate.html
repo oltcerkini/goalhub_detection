@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>GoalHub Ball GT Annotator</title>
+<style>
+  :root{--bg:#0d1117;--panel:#161b22;--line:#30363d;--txt:#e6edf3;--mut:#8b949e;--acc:#2f81f7;--ok:#3fb950;--warn:#d29922;--bad:#f85149}
+  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.4 system-ui,Segoe UI,sans-serif}
+  header{display:flex;gap:8px;align-items:center;padding:8px 12px;background:var(--panel);border-bottom:1px solid var(--line);flex-wrap:wrap;position:sticky;top:0;z-index:5}
+  header b{color:var(--acc)} .mut{color:var(--mut)}
+  button{background:#21262d;color:var(--txt);border:1px solid var(--line);border-radius:6px;padding:6px 10px;cursor:pointer;font:inherit}
+  button:hover{border-color:var(--acc)} button.on{background:var(--acc);border-color:var(--acc);color:#fff}
+  button.warn.on{background:var(--warn);border-color:var(--warn);color:#000}
+  button.bad.on{background:var(--bad);border-color:var(--bad);color:#fff}
+  #wrap{position:relative;height:calc(100vh - 108px);overflow:hidden;background:#000;cursor:crosshair}
+  canvas{display:block} #hint{position:absolute;left:12px;bottom:12px;background:#0009;padding:6px 10px;border-radius:6px;font-size:12px;color:var(--mut)}
+  #mag{position:absolute;right:12px;bottom:12px;width:240px;height:240px;border:1px solid var(--line);border-radius:8px;background:#000;box-shadow:0 4px 16px #000a}
+  #prog{margin-left:auto;font-variant-numeric:tabular-nums}
+  .sep{width:1px;height:22px;background:var(--line);margin:0 4px}
+  .confb{padding:3px 7px;min-width:24px;margin-left:2px}
+  #c4,#c1{display:inline-flex;gap:2px}
+</style>
+</head>
+<body>
+<header>
+  <b>Ball GT</b>
+  <span class="sep"></span>
+  <button id="prev">&larr; Prev</button>
+  <span id="pos" class="mut">0 / 0</span>
+  <button id="next">Next &rarr;</button>
+  <span class="sep"></span>
+  <button id="b4k">Visible@4K <kbd>4</kbd></button>
+  <button id="bts" class="warn">Visible@1024 <kbd>t</kbd></button>
+  <button id="bocc">Occluded <kbd>o</kbd></button>
+  <button id="bmov">Moving <kbd>m</kbd></button>
+  <button id="bnone" class="bad">No ball visible <kbd>x</kbd></button>
+  <span class="sep"></span>
+  <select id="third" title="pitch third">
+    <option value="">third?</option><option>near</option><option>mid</option><option>far</option>
+  </select>
+  <span class="sep"></span>
+  <span class="mut">conf@4K</span><span id="c4"></span>
+  <span class="mut">conf@1024</span><span id="c1"></span>
+  <button id="zoomfit">Fit</button>
+  <span class="sep"></span>
+  <button id="save">Save JSON</button>
+  <button id="load">Load JSON</button>
+  <input id="file" type="file" accept=".json" style="display:none">
+  <div id="prog"></div>
+</header>
+<div id="wrap"><canvas id="cv"></canvas><canvas id="mag" width="240" height="240"></canvas><div id="hint">wheel = zoom &middot; shift-drag = pan &middot; click = ball &middot; magnifier = 2&times; at cursor &middot; &larr;/&rarr; = nav</div></div>
+<script src="manifest.js"></script>
+<script>
+const F = MANIFEST;                 // [{frame, candidate:[x,y,conf]|null, third, dual}]
+const ANN = {};                     // frame -> {x,y,vis4k,vis1024,occluded,moving,none,third}
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+let idx = 0, img = new Image(), scale = 1, ox = 0, oy = 0, dragging = false, lastX = 0, lastY = 0;
+
+function rec(f){ if(!ANN[f]) ANN[f]= {x:null,y:null,vis4k:false,vis1024:false,conf4k:0,conf1024:0,occluded:false,moving:false,none:false,third:''}; return ANN[f]; }
+function confRow(el,key){ for(let v=1;v<=5;v++){ const b=document.createElement('button'); b.className='confb'; b.textContent=v; b.dataset.k=key; b.dataset.v=v;
+  b.onclick=()=>{ const a=rec(cur().frame); a[key]=(a[key]===v?0:v); syncUI(); }; el.appendChild(b); } }
+confRow(document.getElementById('c4'),'conf4k'); confRow(document.getElementById('c1'),'conf1024');
+function cur(){ return F[idx]; }
+
+function fit(){ const r = document.getElementById('wrap').getBoundingClientRect();
+  cv.width = r.width; cv.height = r.height;
+  const s = Math.min(r.width/img.naturalWidth, r.height/img.naturalHeight);
+  scale = s; ox = (r.width - img.naturalWidth*s)/2; oy = (r.height - img.naturalHeight*s)/2; draw(); }
+
+function draw(){ ctx.fillStyle='#000'; ctx.fillRect(0,0,cv.width,cv.height);
+  ctx.imageSmoothingEnabled = scale < 1;
+  ctx.drawImage(img, ox, oy, img.naturalWidth*scale, img.naturalHeight*scale);
+  const a = rec(cur().frame);
+  if(a.x!=null){ const X=ox+a.x*scale, Y=oy+a.y*scale;
+    ctx.strokeStyle='#f85149'; ctx.lineWidth=2; ctx.beginPath();
+    ctx.moveTo(X-16,Y);ctx.lineTo(X+16,Y);ctx.moveTo(X,Y-16);ctx.lineTo(X,Y+16);ctx.stroke();
+    ctx.beginPath();ctx.arc(X,Y,9,0,7);ctx.stroke(); }
+  if(cur().candidate){ const [cx,cy]=cur().candidate; const X=ox+cx*scale, Y=oy+cy*scale;
+    ctx.strokeStyle='#2f81f7'; ctx.setLineDash([5,4]); ctx.lineWidth=1.5;
+    ctx.strokeRect(X-18,Y-18,36,36); ctx.setLineDash([]); }
+}
+function loadFrame(i){ idx = (i+F.length)%F.length; const f=cur(); img.onload = fit; img.src = 'frames/f'+String(f.frame).padStart(6,'0')+'.jpg'; syncUI(); }
+function syncUI(){ const a=rec(cur().frame);
+  document.getElementById('pos').textContent = (idx+1)+' / '+F.length+'  (frame '+cur().frame+')';
+  document.getElementById('b4k').classList.toggle('on',a.vis4k);
+  document.getElementById('bts').classList.toggle('on',a.vis1024);
+  document.getElementById('bocc').classList.toggle('on',a.occluded);
+  document.getElementById('bmov').classList.toggle('on',a.moving);
+  document.getElementById('bnone').classList.toggle('on',a.none);
+  document.getElementById('third').value = a.third;
+  document.querySelectorAll('.confb').forEach(b=>b.classList.toggle('on', a[b.dataset.k]===+b.dataset.v));
+  const done = Object.values(ANN).filter(x=>x.x!=null||x.none).length;
+  document.getElementById('prog').textContent = done+' / '+F.length+' annotated'+(cur().dual?'  · dual subset':'');
+  document.getElementById('load').style.display='inline-block'; }
+function toggle(k){ const a=rec(cur().frame); a[k]=!a[k]; if(k==='none'&&a.none){a.x=null;a.y=null;a.vis4k=false;a.vis1024=false;a.conf4k=0;a.conf1024=0;} syncUI(); draw(); }
+
+document.getElementById('next').onclick=()=>loadFrame(idx+1);
+document.getElementById('prev').onclick=()=>loadFrame(idx-1);
+document.getElementById('b4k').onclick=()=>toggle('vis4k');
+document.getElementById('bts').onclick=()=>toggle('vis1024');
+document.getElementById('bocc').onclick=()=>toggle('occluded');
+document.getElementById('bmov').onclick=()=>toggle('moving');
+document.getElementById('bnone').onclick=()=>toggle('none');
+document.getElementById('third').onchange=e=>{rec(cur().frame).third=e.target.value;syncUI();};
+document.getElementById('zoomfit').onclick=fit;
+
+cv.addEventListener('wheel',e=>{ e.preventDefault(); const r=cv.getBoundingClientRect();
+  const mx=e.clientX-r.left, my=e.clientY-r.top, k=e.deltaY<0?1.15:1/1.15;
+  const nx=(mx-ox)/scale, ny=(my-oy)/scale; scale=Math.max(0.05,Math.min(8,scale*k));
+  ox=mx-nx*scale; oy=my-ny*scale; draw(); },{passive:false});
+cv.addEventListener('mousedown',e=>{ if(e.button===0&&e.shiftKey){dragging=true;lastX=e.clientX;lastY=e.clientY;cv.style.cursor='grabbing';} });
+window.addEventListener('mouseup',()=>{dragging=false;cv.style.cursor='crosshair';});
+const mag=document.getElementById('mag'), mctx=mag.getContext('2d'), MR=60;
+function drawMag(e){ const r=cv.getBoundingClientRect(); const ix=(e.clientX-r.left-ox)/scale, iy=(e.clientY-r.top-oy)/scale;
+  mctx.fillStyle='#000'; mctx.fillRect(0,0,240,240);
+  mctx.imageSmoothingEnabled=false;
+  mctx.drawImage(img, ix-MR, iy-MR, 2*MR, 2*MR, 0,0,240,240);
+  const a=rec(cur().frame);
+  if(a.x!=null && Math.abs(a.x-ix)<MR && Math.abs(a.y-iy)<MR){ const mx=(a.x-ix)*2+120, my=(a.y-iy)*2+120;
+    mctx.strokeStyle='#f85149'; mctx.lineWidth=1.5; mctx.beginPath(); mctx.moveTo(mx-10,my);mctx.lineTo(mx+10,my);mctx.moveTo(mx,my-10);mctx.lineTo(mx,my+10);mctx.stroke(); }
+  mctx.strokeStyle='#2f81f7'; mctx.beginPath(); mctx.moveTo(110,120);mctx.lineTo(130,120);mctx.moveTo(120,110);mctx.lineTo(120,130);mctx.stroke(); }
+cv.addEventListener('mousemove',e=>{ if(dragging){ ox+=e.clientX-lastX; oy+=e.clientY-lastY; lastX=e.clientX; lastY=e.clientY; draw(); } drawMag(e); });
+cv.addEventListener('mouseleave',()=>{ mctx.fillStyle='#000'; mctx.fillRect(0,0,240,240); });
+cv.addEventListener('click',e=>{ const r=cv.getBoundingClientRect(); const a=rec(cur().frame);
+  a.x=(e.clientX-r.left-ox)/scale; a.y=(e.clientY-r.top-oy)/scale; a.none=false; syncUI(); draw(); });
+document.addEventListener('keydown',e=>{ if(e.target.tagName==='SELECT')return;
+  if(e.key==='ArrowRight'){loadFrame(idx+1);} else if(e.key==='ArrowLeft'){loadFrame(idx-1);}
+  else if(e.key==='4')toggle('vis4k'); else if(e.key==='t')toggle('vis1024');
+  else if(e.key==='o')toggle('occluded'); else if(e.key==='m')toggle('moving');
+  else if(e.key==='x')toggle('none'); });
+
+document.getElementById('save').onclick=()=>{
+  const out=F.map(f=>({frame:f.frame, dual:!!f.dual, candidate:f.candidate,
+    label:(ANN[f.frame]||{}), }));
+  const blob=new Blob([JSON.stringify({clip:'barca_goals', annotations:out},null,2)],{type:'application/json'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='ball_gt.json'; a.click(); };
+document.getElementById('load').onclick=()=>document.getElementById('file').click();
+document.getElementById('file').onchange=e=>{ const fr=new FileReader();
+  fr.onload=()=>{ try{ const d=JSON.parse(fr.result); (d.annotations||[]).forEach(a=>ANN[a.frame]=a.label); syncUI(); draw(); }catch(_){} };
+  fr.readAsText(e.target.files[0]); };
+
+loadFrame(0);
+</script>
+</body>
+</html>

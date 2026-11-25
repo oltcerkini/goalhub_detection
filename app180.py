@@ -151,18 +151,21 @@ async def process(data: dict):
 
     start = float(data.get("start", 0.0))
     frames = data.get("frames")            # None = whole clip
+    vspan = data.get("vspan")              # None = calibration vspan / 180
     out_path = OUTPUT_DIR / f"{video_id}_track.json"
     out_video = OUTPUT_DIR / f"{video_id}_players.mp4"
+    out_follow = OUTPUT_DIR / f"{video_id}_follow.mp4"
     task_id = str(uuid.uuid4())[:8]
     tasks[task_id] = {"status": "queued", "video_id": video_id,
                       "results_path": str(out_path), "video_path": str(out_video),
-                      "started_at": None}
+                      "follow_path": str(out_follow), "started_at": None}
 
     def _run():
         cmd = [sys.executable, str(BASE_DIR / "vr180_pipeline.py"),
                "--video", str(video_path), "--calibration", str(cal_path),
-               "--start", str(start), "--no-ball", "--render", str(out_video),
-               "--out", str(out_path)]
+               "--start", str(start), "--render", str(out_video),
+               "--render-follow", str(out_follow),
+               "--enhance", "auto", "--out", str(out_path)]
         meta_p = UPLOAD_DIR / f"{video_id}.meta.json"
         if meta_p.exists():
             cmd += ["--region", *[str(v) for v in json.loads(meta_p.read_text())["region"]]]
@@ -171,6 +174,8 @@ async def process(data: dict):
             cmd += ["--trace", str(trace_p)]
         if frames:
             cmd.extend(["--frames", str(int(frames))])
+        if vspan:
+            cmd.extend(["--vspan", str(float(vspan))])
         tasks[task_id]["status"] = "processing"
         tasks[task_id]["started_at"] = time.time()
         try:
@@ -206,6 +211,17 @@ async def video(task_id: str):
     p = Path(t.get("video_path") or "")
     if not p.exists():
         raise HTTPException(404, "no video yet")
+    return FileResponse(str(p), media_type="video/mp4")
+
+
+@app.get("/api/follow/{task_id}")
+async def follow(task_id: str):
+    t = tasks.get(task_id)
+    if not t:
+        raise HTTPException(404, "unknown task")
+    p = Path(t.get("follow_path") or "")
+    if not p.exists():
+        raise HTTPException(404, "no follow video yet")
     return FileResponse(str(p), media_type="video/mp4")
 
 

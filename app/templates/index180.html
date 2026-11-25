@@ -59,12 +59,14 @@
   </div>
 
   <div class="step" id="step3" style="opacity:.45">
-    <h2><span class="n">3</span>Detect players</h2>
-    <div class="mut">Only people whose feet are on the traced pitch are kept — spectators and the sideline are filtered out.</div>
+    <h2><span class="n">3</span>Detect players + ball</h2>
+    <div class="mut">Only people whose feet are on the traced pitch are kept; the ball is tracked as a moving trail.</div>
     <div class="row">
       <label>start (s)</label><input type="number" id="startS" value="0" step="1">
       <label>frames</label><input type="number" id="numFrames" value="300" title="blank = whole video">
-      <button id="runBtn" disabled>Detect players</button>
+      <label>vspan°</label><input type="number" id="vspan" placeholder="auto" min="10" max="180" step="1"
+        title="Vertical field of view of the content. Wide letterboxed clips are ~40; leave blank for 180/calibration.">
+      <button id="runBtn" disabled>Detect players + ball</button>
       <span id="runStatus" class="mut"></span>
     </div>
     <div id="out"></div>
@@ -86,6 +88,9 @@ $('uploadBtn').onclick=async()=>{
     if(!r.ok) throw new Error(j.detail||('HTTP '+r.status));
     video_id=j.video_id; video_name=j.video_name;
     $('upStatus').innerHTML=`<span class="pill">${j.width}×${j.height}</span><span class="pill">layout ${j.layout}</span>`;
+    // very wide letterboxed strips (e.g. 3621x796) imply a ~40 deg vertical span
+    const implied=180*j.height/j.width;
+    $('vspan').value = implied < 60 ? Math.round(implied) : '';
     // embed the tracing tool, pointed at the uploaded frame and this app
     const q=new URLSearchParams({img:j.frame_url, video_id:j.video_id, api:location.origin, v:Date.now()});
     $('tool').src='/calib/tool?'+q.toString();
@@ -107,6 +112,7 @@ $('runBtn').onclick=async()=>{
   $('runBtn').disabled=true; $('runStatus').textContent='starting…'; $('out').innerHTML='';
   const body={video_id, video_name, start:parseFloat($('startS').value||'0')};
   const nf=parseInt($('numFrames').value); if(nf) body.frames=nf;
+  const vs=parseFloat($('vspan').value); if(vs) body.vspan=vs;
   try{
     const r=await fetch('/api/process',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     const j=await r.json(); if(!r.ok) throw new Error(j.detail||('HTTP '+r.status));
@@ -139,6 +145,9 @@ async function showResults(id){
     `<video src="/api/video/${id}" controls autoplay loop muted playsinline
        style="width:100%;max-width:1200px;border-radius:8px;border:1px solid var(--line);margin-top:12px;background:#000"></video>`+
     `<div class="mut" style="margin-top:6px">annotated video — every player boxed with its track id and pitch position (m)</div>`+
+    `<video src="/api/follow/${id}" controls loop muted playsinline
+       style="width:100%;max-width:1200px;border-radius:8px;border:1px solid var(--line);margin-top:12px;background:#000"></video>`+
+    `<div class="mut" style="margin-top:6px">virtual follow-camera — perspective view that pans to the action</div>`+
     `<table><tr><th>#</th><th>time</th><th>players</th><th>first player pitch (m)</th></tr>${rows}</table>`+
     (fr.length>60?`<div class="mut" style="margin-top:6px">showing first 60 of ${fr.length}</div>`:'');
   $('runBtn').disabled=false;

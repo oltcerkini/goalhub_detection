@@ -85,31 +85,43 @@ YAW_CENTRES_180 = GRID_180[60.0]["yaw"]
 PITCH_CENTRES_180 = GRID_180[60.0]["pitch"]
 
 
-def build_grid(span, fov_h=TILE_FOV_H):
+def build_grid(span, fov_h=TILE_FOV_H, vspan=180.0):
     """Return [(tile_id, yaw_deg, pitch_deg, fov_h_deg), ...].
 
     Span 180 (VR180), fov 60: 5 yaw x 2 pitch = 10 tiles. Yaw cols 60 deg each
     cover -90..+90; pitch rows (+-18 deg) cover about +3..-63.
     Span 180, fov 40: 8 yaw x 3 pitch = 24 tiles (1.5x magnification).
     Span 360: a starting point only (needs more columns); not a target here.
+
+    vspan: vertical pitch scope of the content. A narrow letterboxed strip
+    (e.g. 180x40) is covered by ONE 36-deg-tall row centred on the strip.
     """
     preset = GRID_180.get(float(fov_h))
     if preset is None:
         raise ValueError(f"no grid preset for fov_h={fov_h} (have {list(GRID_180)})")
+    pitch_rows = preset["pitch"]
+    if float(vspan) < 60.0:
+        if float(fov_h) >= 55.0:
+            pitch_rows = (0.0,)
+        else:
+            pitch_rows = (tuple(p for p in preset["pitch"]
+                                if abs(p) <= float(vspan) / 2.0 + 1e-6) or (0.0,))
     tiles, tid = [], 0
-    for p in preset["pitch"]:
+    for p in pitch_rows:
         for y in preset["yaw"]:
             tiles.append((tid, float(y), float(p), float(fov_h)))
             tid += 1
     return tiles
 
 
-def hemisphere_mask(yaw_deg, pitch_deg, fov_deg, span, out_w=TILE_W, out_h=TILE_H):
-    """Boolean mask of tile pixels whose ray yaw lies within +-span/2.
+def hemisphere_mask(yaw_deg, pitch_deg, fov_deg, span, out_w=TILE_W, out_h=TILE_H,
+                    vspan=180.0):
+    """Boolean mask of tile pixels whose ray lies within the source's spans.
 
     For span=180 an edge tile (e.g. yaw +85, 60 deg FOV) reaches past +90; those
     pixels would otherwise be edge-replicated by cv2.remap. Masking them (3c)
-    removes the replicated region before detection.
+    removes the replicated region before detection. vspan does the same for the
+    top/bottom of a vertically cropped strip.
     """
     fx = (out_w / 2.0) / np.tan(np.radians(fov_deg) / 2.0)
     uu, vv = np.meshgrid(np.arange(out_w), np.arange(out_h))
@@ -117,21 +129,25 @@ def hemisphere_mask(yaw_deg, pitch_deg, fov_deg, span, out_w=TILE_W, out_h=TILE_
     y = (vv - out_h / 2.0) / fx
     fwd, right, up = _tile_basis(yaw_deg, pitch_deg)
     dx = fwd[0] + x * right[0] - y * up[0]
+    dy = fwd[1] + x * right[1] - y * up[1]
     dz = fwd[2] + x * right[2] - y * up[2]
+    norm = np.sqrt(dx * dx + dy * dy + dz * dz)
     ray_yaw = np.degrees(np.arctan2(dx, dz))
-    return np.abs(ray_yaw) <= (span / 2.0 + 1e-6)
+    ray_pitch = np.degrees(np.arcsin(np.clip(dy / norm, -1.0, 1.0)))
+    return ((np.abs(ray_yaw) <= (span / 2.0 + 1e-6))
+            & (np.abs(ray_pitch) <= (vspan / 2.0 + 1e-6)))
 
 
-def tile_equirect(equirect_img, grid, span, mask_edges=True):
+def tile_equirect(equirect_img, grid, span, mask_edges=True, vspan=180.0):
     """Produce tile views: list of (tile_img, yaw, pitch, fov, tile_id).
     No detection here — pure projection (2.3). For span<360 with mask_edges,
     the out-of-hemisphere (edge-replicated) region is blacked out (3c)."""
     out = []
     for (tid, yaw, pitch, fov) in grid:
         img = equirect_to_perspective(equirect_img, yaw, pitch, fov,
-                                      TILE_W, TILE_H, span)
+                                      TILE_W, TILE_H, span, vspan)
         if mask_edges and span < 360:
-            m = hemisphere_mask(yaw, pitch, fov, span)
+            m = hemisphere_mask(yaw, pitch, fov, span, vspan=vspan)
             if not m.all():
                 img = np.where(m[:, :, None], img, 0)
         out.append((img, yaw, pitch, fov, tid))
@@ -150,11 +166,12 @@ def _tile_basis(yaw_deg, pitch_deg):
 
 
 def tile_pixel_to_equirect(u, v, yaw_deg, pitch_deg, fov_deg, span, eq_w, eq_h,
-                           out_w=TILE_W, out_h=TILE_H):
+                           out_w=TILE_W, out_h=TILE_H, vspan=180.0):
     """Inverse of the projection: tile-local pixel -> equirect pixel.
 
     Tile pixel -> ray direction (pinhole, fx=fy) -> spherical (yaw, pitch) ->
     equirect pixel. This is the exact inverse of equirect_to_perspective.
+    `vspan` must match the projection's vertical span.
     """
     fx = (out_w / 2.0) / np.tan(np.radians(fov_deg) / 2.0)
     x = (u - out_w / 2.0) / fx
@@ -165,7 +182,7 @@ def tile_pixel_to_equirect(u, v, yaw_deg, pitch_deg, fov_deg, span, eq_w, eq_h,
     ray_pitch = np.degrees(np.arcsin(np.clip(d[1], -1.0, 1.0)))
     ray_yaw = np.degrees(np.arctan2(d[0], d[2]))
     X = (ray_yaw / span + 0.5) * eq_w
-    Y = (0.5 - ray_pitch / 180.0) * eq_h
+    Y = (0.5 - ray_pitch / vspan) * eq_h
     return float(X), float(Y)
 
 
@@ -196,26 +213,30 @@ def _same_object(a, b, iou_thr, dist_frac, criterion, bbox_key="bbox"):
     return dist <= dist_frac * min(wa, wb, ha, hb)
 
 
-def _map_bbox_exact(bbox, yaw, pitch, fov, span, eq_w, eq_h):
+def _map_bbox_exact(bbox, yaw, pitch, fov, span, eq_w, eq_h, vspan=180.0):
     """Project the four tile-local bbox corners and take their equirect AABB.
     This replaces the earlier linear approximation (4.1) — no sec^2 error."""
     x1, y1, x2, y2 = bbox
     xs, ys = [], []
     for (u, v) in ((x1, y1), (x2, y1), (x2, y2), (x1, y2)):
-        X, Y = tile_pixel_to_equirect(u, v, yaw, pitch, fov, span, eq_w, eq_h)
+        X, Y = tile_pixel_to_equirect(u, v, yaw, pitch, fov, span, eq_w, eq_h,
+                                      vspan=vspan)
         xs.append(X); ys.append(Y)
     return [min(xs), min(ys), max(xs), max(ys)]
 
 
-def _map_bbox_linear(bbox, yaw, pitch, fov, span, eq_w, eq_h):
+def _map_bbox_linear(bbox, yaw, pitch, fov, span, eq_w, eq_h, vspan=180.0):
     """Previous approximation: centre mapped exactly, size scaled by the local
     linear (Jacobian) of the tile->equirect map. Kept only to measure its error."""
     x1, y1, x2, y2 = bbox
     uc, vc = (x1 + x2) / 2.0, (y1 + y2) / 2.0
-    X, Y = tile_pixel_to_equirect(uc, vc, yaw, pitch, fov, span, eq_w, eq_h)
+    X, Y = tile_pixel_to_equirect(uc, vc, yaw, pitch, fov, span, eq_w, eq_h,
+                                  vspan=vspan)
     eps = 4.0
-    Xu, Yu = tile_pixel_to_equirect(uc + eps, vc, yaw, pitch, fov, span, eq_w, eq_h)
-    Xv, Yv = tile_pixel_to_equirect(uc, vc + eps, yaw, pitch, fov, span, eq_w, eq_h)
+    Xu, Yu = tile_pixel_to_equirect(uc + eps, vc, yaw, pitch, fov, span, eq_w, eq_h,
+                                    vspan=vspan)
+    Xv, Yv = tile_pixel_to_equirect(uc, vc + eps, yaw, pitch, fov, span, eq_w, eq_h,
+                                    vspan=vspan)
     wt, ht = (x2 - x1), (y2 - y1)
     w_eq = abs(Xu - X) / eps * wt + abs(Xv - X) / eps * ht
     h_eq = abs(Yu - Y) / eps * wt + abs(Yv - Y) / eps * ht
@@ -223,7 +244,7 @@ def _map_bbox_linear(bbox, yaw, pitch, fov, span, eq_w, eq_h):
 
 
 def merge_to_equirect(tile_dets, span, eq_w, eq_h, iou_thr=0.5, bbox_key="bbox",
-                      criterion="center", dist_frac=0.5):
+                      criterion="center", dist_frac=0.5, vspan=180.0):
     """Map tile detections to equirect pixels, then greedy merge (tie-break by
     confidence). NO merging in tile space.
 
@@ -241,9 +262,11 @@ def merge_to_equirect(tile_dets, span, eq_w, eq_h, iou_thr=0.5, bbox_key="bbox",
         x1, y1, x2, y2 = d["bbox"]
         uc, vc = (x1 + x2) / 2.0, (y1 + y2) / 2.0
         cx, cy = tile_pixel_to_equirect(uc, vc, d["yaw"], d["pitch"], d["fov"],
-                                        span, eq_w, eq_h)
-        exact = _map_bbox_exact(d["bbox"], d["yaw"], d["pitch"], d["fov"], span, eq_w, eq_h)
-        lin = _map_bbox_linear(d["bbox"], d["yaw"], d["pitch"], d["fov"], span, eq_w, eq_h)
+                                        span, eq_w, eq_h, vspan=vspan)
+        exact = _map_bbox_exact(d["bbox"], d["yaw"], d["pitch"], d["fov"], span, eq_w, eq_h,
+                                vspan=vspan)
+        lin = _map_bbox_linear(d["bbox"], d["yaw"], d["pitch"], d["fov"], span, eq_w, eq_h,
+                               vspan=vspan)
         mapped.append({
             "tile_id": d["tile_id"], "yaw": d["yaw"], "pitch": d["pitch"],
             "conf": float(d["conf"]), "cls": d.get("cls", 0),

@@ -37,11 +37,11 @@ Barca trace does not calibrate yet** — the fitted pose is degenerate.
 | 11 | metric projection + calibration gate | ✅ **DONE** — vspan honoured; above-horizon rays gated; invalid cal withholds metres |
 | 12 | ROI: drop off-pitch | ✅ **DONE** — calibration-derived pitch ROI; grass fallback |
 | **CAL** | **real calibration (calib_equirect.json)** | ⚠ **APPROXIMATE, accepted 2026-10-12** — parity bug fixed → `valid=true` (med 0.82 m) but the trace is imperfect (near touchline inside the paint) so expect metre-level error; `calib/calibration.json` shipped |
-| 13 | goal validation on 36.35 s clip | ⚠ **tested 2026-10-12 — 0 goals, BLOCKED on the ball.** With the approximate calibration, the ball trail (`out/track_goal2.json`, 35–39.6 s) sits at ground x∈[-0.5,10.6] z∈[24,34] for all 110 frames — never within 3 m of a goal line (x=±52.5), and dominantly at a few REPEATED pixels (eq(464,1021) ×7, eq(2979,1445) ×6 …) = static false positives. The goal logic can't fire because the ball isn't tracked. Fix #14 first. |
-| 14 | ball temporal redesign (Track B) | ⏸ the main open risk |
+| 13 | goal validation on 36.35 s clip | ⚠ **still BLOCKED 2026-11-25 — goal event not located in the file.** The ball is now tracked, but at 36.35 s it is at **midfield** (~+9 m, near the camera touchline), consistent with the metre mapping. A 3× **zoomed** ball scan of both traced goal mouths over **0–120 s** found **no ball entering either goal** (only a dead-ball clearance by the left goal at ~10.5–12 s; mouths visually empty in montages of 0–13 s / 33–41 s left and 35.5–39.5 s right). So it is **not** a calibration or ball-tracker fault. User gave ground truth **right goal 21:25**; at that far camera the ball is unresolvable/cluttered at the goal → still not validatable here; needs a closer-camera clip or a goal-region ball fine-tune. |
+| 14 | ball temporal redesign (Track B) | ✅ **BASELINE DONE 2026-11-24** — `ball_trail.py` temporal tracker: **70% GT coverage, 2.4 px median**; follows the Barca ball 35.3 s+. Remaining: detector gaps (15/50 GT misses are `NO_CAND`, not tracker drops), id splits after gaps, sparse night clips. |
 | 15 | app: upload → calibrate → process | ✅ **DONE 2026-10-12** — `app180.py` (port 8081) + `app/templates/index180.html`: upload 180 video → trace in the embedded `calibrate.html` → calibrate → **detect players → annotated MP4** (`/api/video/{task_id}`; boxes + track id + pitch position, h264). Verified end-to-end over HTTP on a 30 s clip: 30 frames, 21-22 players, 1.25 s mp4. Drone `app.py` untouched. |
 | 16 | validate across all 6 clips | ⏸ |
-| 17 | virtual camera + MP4 | ⏸ |
+| 17 | virtual camera + MP4 | ✅ **DONE 2026-11-25** — `vr180_pipeline.py --render-follow` reprojects the annotated equirect through a smoothed virtual camera (`virtual_camera.compute_camera_pose` → `spherical_projection.equirect_to_perspective`, FOV 70, 1280×720, h264). Targets ball if tracked else player-centroid; snaps to first target then eases. App exposes `/api/follow/{task_id}` + a second video. Verified on Barca 15 frames (Barca centre circle, boxed players, metre labels, clean pan). |
 
 **Session 2026-11-24 — calibration is now a true Bézier pen tool.**
 - `calib/calibrate.html`: click = corner (straight); click-drag = curve **only the
@@ -91,6 +91,132 @@ Barca trace does not calibrate yet** — the fitted pose is degenerate.
   not missing players. Tiled@0.10 already finds the on-pitch players.
 - Flat pipeline untouched (defaults preserved); **no model retrain.** Rendered overlays in
   gitignored `out/roi_*.jpg`; `test_trace_roi.py` PASS; app `/api/process` uses `--trace`.
+
+**Session 2026-11-24 — detection A/B (night clip, 10 s).**
+- Clip: `out/D.D.WOLVES_10s.mp4` (cut from 15:00 of the 51-min night match), 8 sampled
+  frames. Same tiled path, conf 0.10, shape filter; no ROI/calibration.
+- Baseline (FOV60, imgsz1280): **15 detections**, median conf 0.221, 5 at ≥0.25.
+- **CLAHE (clipLimit 2.0): 28 detections**, median 0.293, 18 at ≥0.25 — visually the boxes
+  are real players. **Best config.**
+- **2× Lanczos content upscale: 15 detections — no gain.**
+- **imgsz1536: 9 detections — worse.** CLAHE+1536: 24 — worse than CLAHE alone.
+- **Conclusion: do NOT add an upscaler.** Low-light preprocessing (CLAHE) is the cheap win.
+- Remaining recall was geometry: content is 3621×796, but the projection assumed 796 px =
+  180° vertical (~4.4 px/deg vertical vs ~20 px/deg horizontal).
+- **vspan-aware tiling implemented (same session).** `equirect_to_perspective`,
+  `tile_equirect`, `tile_pixel_to_equirect`, `hemisphere_mask`, the bbox merge and
+  `build_grid` take `vspan`; a narrow strip uses one 36°-tall pitch row. Defaults stay 180.
+- Night clip 8-frame A/B: **vspan180+CLAHE 28 detections / median 0.293**;
+  **vspan40 246 / 0.769**; **vspan40+CLAHE 255 / 0.726, 214 at ≥0.25**. Visual overlays
+  show boxes on distinct players (not duplicates). Full pipeline vspan40+auto (no ROI):
+  **27–34 players/frame, 30 unique IDs**; CLAHE fired on all 8 night frames.
+- **Conclusion: performance was geometry, not pixels.** Upscaling is falsified; CLAHE +
+  the vertical-span correction is the win.
+- App: a `vspan°` field auto-prefills ~40 when the content aspect implies <60°; the
+  pipeline receives `--vspan`; `--enhance auto` is the default. (The grass fallback is
+  unreliable on this night strip; the trace ROI is the path.)
+- Caveat: the app's vspan field changes **tiling** only. The calibration pose/metrics
+  still use the calibration's `vspan_deg` (180); solving calibration with vspan is the
+  remaining step for accurate metres.
+- `test_vspan_tiling.py` PASS; projection synthetic + `test_metric_roi` + phase4 PASS.
+- Full-strip direct detection finds 20–30 boxes/frame but is clutter-heavy (not a fallback).
+
+**Session 2026-11-24 — ball detection: temporal trail tracker.**
+- New `ball_trail.py`: links low-confidence full-frame ball candidates with a
+  constant-velocity tracker. Static FPs are rejected by net displacement / speed;
+  gaps are predicted; the best track is chosen by confidence + net travel + hits.
+- **GT clip `f5bacf2f` (drone, 50 labeled frames, `annotation/ball_gt.json`):
+  35/50 tracked (70%), median 2.4 px, 89% ≤10 px, 100% ≤20 px.** The old top-1
+  pick/validator failed because static FPs outscored the real ball.
+- **Barca VR180 confirmed-goal clip:** the tracker follows the white ball left
+  through 36.3 s (zoom confirmed); end-to-end 42/48 frames with a ball, ids 1/2.
+- `vr180_pipeline` ball path replaced: full-frame candidates at conf 0.03 with a
+  3–100 px size gate + trace/pose ROI -> tracker (gate 100 px, min hits 3); output
+  carries `id`/`predicted`; the app no longer runs `--no-ball` and draws the ball.
+- Remaining: 30% of GT frames untracked (detector gaps/start), the trail can split
+  into ids 1/2 after a lost frame, and the wide night clip is candidate-sparse.
+  A retrain is still optional; the tracker is the new baseline.
+- `test_ball_trail.py` PASS; GT/Barca evidence images in gitignored `out/`.
+
+**Session 2026-11-25 — ball GT re-measured; goal event not found.**
+- `test_ball_trail` and `test_vspan_tiling` **ALL PASS**. GT eval re-run
+  (`out/_ball_tracker_eval.py`): **35/50 = 70% coverage, median 2.4 px,
+  89% ≤10 px, 100% ≤20 px** — unchanged, confirmed.
+- **All 15 GT misses are detector gaps** (`out/_ball_diag.py`): no candidate
+  (even before the size gate) within 40 px of the GT ball on those frames; the
+  only candidates are a static left-edge blob. Only **2/15** are tracker
+  false-drops (frames 28/32): a live track is rejected by the static gate
+  `net < min_move_px` even though `speed` is fine — the gate uses `or`; a
+  candidate fix is `net < min_move AND speed < min_speed` (not yet applied).
+- **Goal #13 re-check — the ball trail does not reach a goal.** At 36.35 s the
+  tracked white ball is at ground **(x≈+9 m, z≈28 m)** = midfield, near the
+  camera touchline; the metre position **agrees with the image** (calibration
+  not at fault). A 3× zoomed ball scan of both traced goal mouths over
+  **0–120 s** finds **no ball inside either goal**; the only goal-area motion is
+  a dead-ball clearance at the left goal ~10.5–12 s (mouth empty throughout).
+  Visual montages (`out/goal_left_montage.jpg`, `goal_right_36_39_montage.jpg`,
+  `goal_left_mouth_montage.jpg`, etc.) all show empty mouths. → the "goal at
+  36.35 s" does not reproduce; awaiting the user's exact time/screenshot.
+- `out/_goal_scan.py` (full-frame) + `out/_goal_zoom_scan.py` (zoomed, the
+  sensitive path) are the reusable goal-locating harnesses.
+- **Full 66-min scan (both goals, ~16 min) is too noisy to auto-locate a goal:**
+  4633 goal-mouth hits → 225 "events", dominated by the ball model firing on the
+  **nets / keepers / goal structure** at both ends. The highest-in-confidence
+  goal-area object at 36:00 (left, conf 0.84) is the **goalkeeper**. So automated
+  goal-finding from this far sideline camera is not reliable.
+- **Strategic point:** this FC Dallas clip is a **far sideline** camera (ball ~10 px
+  at the goal, goals cluttered). The product direction is **closer 180 cams**,
+  where the ball/goal are much larger. Validating goals on this clip may be the
+  wrong target — prefer a closer-camera clip. Either way, a single confirmed
+  mm:ss is needed to exercise `goal_detect.py` on real footage.
+- **User ground truth: RIGHT goal at 21:25 (1285 s).** Checked `out/_goal_validate.py`:
+  the pipeline ball tracker over 1267–1307 s **locks onto near-touchline clutter**
+  (ground x≈−5 m, z≈33 m) and never nears the right goal → `detect_goals` = 0.
+  Ultra-tight montage `out/goal_right_1285_ultra_montage.jpg` (1284–1290 s) shows
+  players + neon keeper packed in the goal mouth (consistent with a goal) but the
+  **ball is not resolvable** at ~50 m — it blends into white shirts/keeper.
+- **Verdict 2026-11-25: goal detection is NOT validatable on this far-camera clip.**
+  The blocker is **source angular resolution at the goal + goal-mouth clutter**, not
+  the goal logic (synthetic self-test PASS). To validate on real footage: use a
+  **closer-camera clip**, or fine-tune the ball model on **goal-region ball-vs-clutter**
+  data (ball + negatives: keeper/net/posts), which the user offered to supply.
+- **Scale diagnostic on 18 hand-labeled frames (2026-11-25):** full-frame imgsz1024
+  detects **0/9** labeled balls (nearest 700–1900 px away); a **3× zoomed** crop around
+  each ball detects **9/9 at ~0.7 px, most conf 0.81–0.86**. So the ball IS detectable —
+  the model is scale-limited at full-frame (a ~10 px ball → ~2.7 px input).
+  `out/_eval_goal_gt.py`, `out/_eval_goal_gt_zoom.py`.
+- **Fair multi-scale test (no GT hints) FAILS (2026-11-25):** 600 px native tiles +
+  full-frame (`out/_multiscale_eval.py`) finds only **1/9** balls; nearest 134–922 px,
+  with high-conf hits on **players**. General tiling/zoom does NOT work with this model
+  (confirms the [[ball-native-tiling-falsified]] players↔ball confusion). The ball is
+  reliable only in an isolated ball-centred crop. Higher inference res (`.pt` at
+  imgsz 1280/1920/2560) also gives **0–1/9** (`out/_highres_eval.py`). **Real fix = a
+  scale-aware ball retrain (needs more labels than 18) or a closer camera.**
+  Tiling/zoom/high-res exhausted. Note: the far camera is not the product setup.
+
+**=== SESSION 2026-11-25 (end) — RESUME STATE ===**
+- **Virtual follow-camera + MP4 DONE (task #17):** `vr180_pipeline.py --render-follow`
+  (smoothed pose → `equirect_to_perspective`, FOV 70, 1280×720, h264); app `/api/follow/{id}`
+  + second video in `index180.html`. Verified on Barca 15 frames. **Flat pipeline untouched.**
+- **Ball findings (recorded above):** full-frame 0/9, tiling 1/9, high-res 0–1/9, isolated
+  crop 9/9 → current model can't detect far goal balls in context. **Far-camera goals
+  PARKED** (retrain or closer cam needed; not the product setup).
+- **18 hand labels exist:** `annotation_goals/ball_gt (2).json` (9 pos / 9 neg) — measuring
+  stick for any future ball work. `annotation/build_goal_sheet.py` regenerates the sheet.
+- **Ball-trail static-gate fix REVERTED** (coverage↑ but 401 px outliers + unit-test fail);
+  tracker stays 70% / 2.4 px. `test_ball_trail` + `test_vspan_tiling` PASS.
+- **NEXT (say "continue"):** read `PLAN.md` → **Step 2** = run SHORT SAMPLES of the 6 clips
+  (night, stereo, portrait, wide-strip) to surface + fix cheap failures. Not full matches.
+- **Waiting on user only for:** a closer-camera clip (unlocks goals) and camera specs
+  (model/resolution/FOV → makes calibration easier). Neither blocks Step 2.
+- **Git:** all changes are in the working tree, UNCOMMITTED (not committed, per no-unasked-commit rule).
+- **Naive goal-region zoom + tracker fails (FP lock):** `out/_goal_zoom_track.py` over
+  21:15–21:45 locks onto the **static keeper/goal-post** (conf ~0.5, net~0, stuck id)
+  instead of the ball → 0 GT matches. The static gate only rejects conf < `high_conf`
+  (0.5), so a ~0.5–0.6 keeper slips through. **Fix direction:** multi-scale ball pass +
+  stronger static-FP handling (raise `high_conf`, or moving-only for goal-region tracks).
+  Consistent with [[ball-native-tiling-falsified]] (players↔ball confusion); no model
+  retrain planned yet.
 
 **Calibration session (2026-10-09).** The user traced `calib/calib_equirect.json`
 (frame_85s, Barca, 105×68). Visually the near touchline / both goal lines /
@@ -228,9 +354,9 @@ Target user: an amateur club coach — one fixed 180° camera pitch-side, no ope
 ### Open / blocked
 | Issue | Status |
 |---|---|
-| **Ball detection on VR180** | Finds real balls on the **full frame** (visually confirmed) but low confidence (median 0.11). Validator re-tune (Test A) and player-proximity prior (Test B) **both failed** — best 42 % coverage / 28 % multi-detection. **This is the main open problem.** |
-| Real calibration | Needs the user to trace `calib/calib_equirect.json`. Tool exists. |
-| Goal detection on real footage | Needs calibration + a clip with a confirmed goal. |
+| **Ball detection on VR180** | ⚠ **IMPROVED 2026-11-24** — temporal trail tracker on low-confidence full-frame candidates: **70% GT coverage, 2.4 px median** on the labeled drone clip; follows a Barca VR180 ball through 37 s. Confirmed 2026-11-25: the 15 GT misses are **detector gaps**, not tracker drops. Night/wide clips still candidate-sparse; retrain optional. |
+| Real calibration | Approximate (`calib/calibration.json`, med 0.82 m). Metre mapping is self-consistent (2026-11-25). |
+| Goal detection on real footage | ⚠ **BLOCKED 2026-11-25 — goal event not located.** At 36.35 s the ball is at midfield; a 3× zoomed scan of both traced goal mouths over 0–120 s finds no ball entering a goal. Logic vouched by the synthetic self-test (`calib/goal_detect.py`). Awaiting the exact time/screenshot. |
 | ROI / off-pitch filtering | ✅ **DONE 2026-11-24** — ROI is the traced pitch polygon (pose/grass fallbacks). Measured to drop foreground + far-sideline spectators. |
 | Virtual camera renderer | Only the pose controller (`virtual_camera.py`) exists. No video output. |
 | Integration | `--input-mode equirect` in `process.py` **not started**. |
@@ -242,15 +368,18 @@ Target user: an amateur club coach — one fixed 180° camera pitch-side, no ope
 - The far-side limit is **source angular resolution** (~19 px/deg), not the pipeline. An 8K source would roughly double it.
 - **Full-frame union does not add on-pitch recall** (2026-11-24): the extra boxes were subs/coaches behind the far touchline. Tiled@0.10 already finds the players.
 - ByteTrack's default **0.25 activation**, the wrapper's hard-coded **IoU-0.5 re-match**, and the one-frame **unconfirmed** delay each silently dropped far players (conf 0.10–0.25). VR180 bypasses all three; the flat pipeline keeps the defaults.
+- **Vertical span beats upscaling (2026-11-24):** a 3621×796 night strip at vspan=40 gives **29–36 detections/frame** (median conf 0.73) vs **1–5 at vspan=180**. 2× Lanczos upscaling and imgsz1536 did **not** help; CLAHE does.
+- **Ball tracking works on the labeled clip (2026-11-24):** low-confidence candidates + a motion tracker give **70% GT coverage at 2.4 px median**; the old top-1/validator picked static FPs. On the Barca VR180 clip the tracker follows a white ball through 37 s — but at 36.35 s that ball is at **midfield**, not a goal (see #13, 2026-11-25).
 - Equirect **span=180 has no horizontal seam** (that only exists for 360).
 - All equirect coordinates are relative to the **cropped content region**; the ball trail was once in full-frame coords → offset by the crop origin.
 
 ## 3. Architecture (module map)
 
 ```
-spherical_projection.py   equirect <-> perspective (equirect_to_perspective)
-spherical_tiling.py       detect_content_region, detect_span, build_grid, tile_equirect,
-                          hemisphere_mask, tile_pixel_to_equirect, merge_to_equirect (centre-NMS),
+spherical_projection.py   equirect <-> perspective (equirect_to_perspective; hspan+vspan)
+spherical_tiling.py       detect_content_region, detect_span, build_grid(vspan), tile_equirect(vspan),
+                          hemisphere_mask(vspan), tile_pixel_to_equirect(vspan),
+                          merge_to_equirect (centre-NMS, vspan),
                           pitch_polygon_from_trace / trace_roi_filter (trace-derived pitch ROI),
                           grass_roi_polygon, roi_filter, sidecar <video>.equirect.json
 virtual_camera.py         compute_camera_pose (smooth follow; tested)
@@ -264,6 +393,7 @@ calib/spherical_calib.py  pose solver (6-DoF, exact line residuals), equirect_to
                           pitch_to_equirect, calibration_from_traces (contract v1)
 calib/calibrate.py        CLI: trace file -> calibration.json
 calib/goal_detect.py      goal plane + ball-crossing logic
+ball_trail.py             temporal tracker for low-confidence full-frame ball candidates
 test_*.py                 per-phase validations (keep these; they are the evidence)
 ```
 
@@ -359,6 +489,11 @@ the Barca round-circle observation, so unresolved).
 **Second finding:** one in six clips is **stereo** (SBS) — `equirect.py` now
 auto-detects and de-stacks (takes one eye).
 
+**2026-11-24 update:** a fixed `vspan` is now propagated through tiling/merge and exposed
+as `--vspan` (the app auto-prefills ~40 when the content aspect implies <60°). Solving
+vspan jointly with the pose remains off (ill-conditioned); for detection, supply the
+camera's real vertical FOV. `--enhance auto` applies CLAHE to dark frames.
+
 ## 6. Waiting on the user
 - ~~A VR180 clip with a clear goal~~ — **resolved**: user confirmed a goal at
   **36.35 s** in `Barca Academy Austin 04B Blue vs FC DallasAlamo 4K 180VR`
@@ -391,6 +526,15 @@ auto-detects and de-stacks (takes one eye).
   supervision wrapper's hard-coded IoU-0.5 re-match, and one-frame "unconfirmed" new
   tracks. All three are bypassed for VR180 only; `PlayerTracker` defaults (0.25, strict)
   keep the flat pipeline identical. No retrain.
+- **Vertical span is a first-class tiling parameter (2026-11-24).** `vspan` flows through
+  the projection, tiling, inverse mapping, mask, merge and grid (default 180). Wide
+  letterboxed strips (aspect >3) use one 36° pitch row and vspan≈40; this is a much larger
+  detection gain than any upscaler. Calibration metrics still use the calibration's
+  `vspan_deg` until calibration-vspan solving is wired.
+- **Ball = temporal trail tracker on low-conf full-frame candidates (2026-11-24).**
+  No threshold/validator/upscale: `ball_trail.py` links precise low-confidence candidates,
+  rejects static FPs by net motion, and predicts gaps. The app ball is enabled; no retrain
+  yet. Night/wide clips remain candidate-sparse.
 - **Calibration robustness (2026-10-09, real trace):** off-frame trace points
   dropped; boundary lines are modeled as **segments** not infinite lines (infinite
   lines let points slide → degenerate poses); a **robust loss** (soft_l1) down-weights
