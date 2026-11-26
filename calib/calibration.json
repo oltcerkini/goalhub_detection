@@ -1,17 +1,17 @@
 {
   "version": 1,
   "projection": "equirect",
-  "span_deg": 180.0,
-  "vspan_deg": 180.0,
+  "span_deg": 179.5565661600161,
+  "vspan_deg": 178.54627059894676,
   "image_size": [
     3401,
     1586
   ],
   "content_region": null,
-  "source_image": "frame_85s.jpg",
+  "source_image": "synthetic",
   "pitch": {
-    "length": 105,
-    "width": 68,
+    "length": 105.0,
+    "width": 68.0,
     "penalty_depth": 16.5,
     "penalty_half": 20.16,
     "circle_r": 9.15,
@@ -20,60 +20,73 @@
   },
   "camera_pose": {
     "position_m": [
-      0.5901783951498872,
-      5.321474924440395,
-      33.56034358428267
+      25.361173102958272,
+      9.46953140768062,
+      -58.15254756585525
     ],
     "rotation_vector": [
-      0.09646081341531325,
-      -3.0763249023309807,
-      0.34769278924388747
+      0.31033740399439985,
+      1.0885163732312544,
+      0.12306296424017382
     ],
     "R": [
       [
-        -0.997085507347909,
-        -0.06678813318708919,
-        -0.036875958321742106
+        0.4620736903292837,
+        0.05328212105691085,
+        0.8852394705847418
       ],
       [
-        -0.05687288847976031,
-        0.9728722421416247,
-        -0.22424333886717054
+        0.24957385035415117,
+        0.9500389074465214,
+        -0.18745390782062596
       ],
       [
-        0.05085239023617251,
-        -0.22149254103854507,
-        -0.9738352471910003
+        -0.8509998812719547,
+        0.3075501421126264,
+        0.42569015981300573
       ]
     ]
   },
   "traced_features": {
     "labels": [
-      "goal_line_left",
+      "centre_circle",
       "goal_line_right",
       "halfway",
+      "penalty_box_right",
       "touchline_far",
       "touchline_near"
     ],
     "points_per_label": {
-      "touchline_far": 25,
-      "goal_line_right": 48,
-      "touchline_near": 87,
-      "goal_line_left": 48,
-      "halfway": 25
+      "touchline_near": 18,
+      "touchline_far": 12,
+      "goal_line_right": 25,
+      "halfway": 18,
+      "penalty_box_right": 4,
+      "centre_circle": 13
     },
-    "label_parity": "goal_lines_flipped"
+    "label_parity": "as_traced",
+    "dropped_labels": []
   },
   "quality": {
-    "med_m": 0.8160003654174304,
-    "rms_m": 6.820111544243873,
-    "rms_px": 174.7937968939668,
-    "n_points": 233,
+    "med_px": 1.1544635789794628,
+    "trim90_px": 1.1324598234683172,
+    "rms_px": 1.9518987675112893,
+    "med_m": 0.36567266329074233,
+    "rms_m": 1.4502486976706992,
+    "n_points": 90,
     "valid": true,
+    "valid_threshold_px": 15.304499999999999,
     "valid_threshold_m": 1.0,
-    "suspect_labels": [
-      "touchline_far"
-    ],
-    "corners_in_frame": 4
+    "label_med_px": {
+      "touchline_near": 0.8001883007534171,
+      "touchline_far": 1.6142532322226848,
+      "goal_line_right": 0.9758706009845005,
+      "halfway": 0.9327925934927619,
+      "penalty_box_right": 2.177704419474714,
+      "centre_circle": 0.6083832242626841
+    },
+    "suspect_labels": [],
+    "corners_in_frame": 2,
+    "span_at_bound": false
   }
 }

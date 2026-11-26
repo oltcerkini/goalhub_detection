@@ -22,6 +22,7 @@ polyline sampling, which otherwise quantises the fit).
 
 import numpy as np
 from scipy.optimize import least_squares
+from scipy.spatial import cKDTree
 
 # ---- standard dimensions (metres); defaults, overridable by the user ------ #
 DEFAULT_PITCH = {
@@ -297,8 +298,108 @@ def solve_pose(traces, W, H, span=180.0, geom=None, seed_inits=None, max_nfev=40
             "n": int(n), "labels": sorted(groups)}
 
 
+# ---- pixel-space refinement ----------------------------------------------- #
+# The metre-space fit above is dominated by the near camera: a far-field trace
+# can be 100+ px wrong while barely moving the metric residual. Refine the pose
+# (and the spans, which are NOT reliably 180 in cropped VR180) so the projected
+# pitch curves land on the traced pixels — that is exactly what the user drew.
+# Median px distance as a fraction of image width. 0.45% of W (~15 px at 3400)
+# corresponds to roughly 0.7 deg of projection error — about 0.4 m at 30 m.
+PX_VALID_FRAC = 0.0045
+PX_OUTLIER_MIN = 10.0        # a label worse than this median px is a mistrace candidate
+PX_OUTLIER_FACTOR = 3.0      # ... or this many times the overall label median
+
+
+def px_valid_threshold(W):
+    return max(8.0, PX_VALID_FRAC * float(W))
+
+
+def _dense_curve(spec, n=800):
+    """Dense samples of a pitch feature, for projecting it into the image."""
+    if spec[0] in ("line", "segment"):
+        a, b = np.asarray(spec[1], float), np.asarray(spec[2], float)
+        return a + np.linspace(0, 1, n)[:, None] * (b - a)
+    if spec[0] == "circle":
+        c, r = np.asarray(spec[1], float), float(spec[2])
+        ang = np.linspace(0, 2 * np.pi, n)
+        return np.stack([c[0] + r * np.cos(ang), c[1] + r * np.sin(ang)], 1)
+    pts = np.asarray(spec[1], float)
+    if len(pts) > 1:                              # closed outline -> subdivide
+        seg = max(1, n // len(pts))
+        out = [pts[i] + np.linspace(0, 1, seg)[:, None] * (pts[(i + 1) % len(pts)] - pts[i])
+               for i in range(len(pts))]
+        return np.vstack(out)
+    return pts
+
+
+def _project_curve(pts_m, pose, W, H, span, vspan):
+    ex, ey = pitch_to_equirect(pts_m[:, 0], pts_m[:, 1], pose, W, H, span, vspan)
+    ex, ey = np.ravel(ex), np.ravel(ey)
+    ok = np.isfinite(ex) & np.isfinite(ey)
+    return np.stack([ex[ok], ey[ok]], 1)
+
+
+def fit_pixel(traces, W, H, geom, pose0, span0, vspan0, max_nfev=120, f_scale=2.0):
+    """Refine (P, rvec, span, vspan) minimising traced-pixel -> model px distance.
+
+    traces: [(x_px, y_px, label)] already parity-mapped. points are compared to
+    the DENSELY projected model curve of their own label, so no ground-plane
+    inversion is needed (rays above the horizon are handled naturally).
+    """
+    groups = {}
+    for x, y, lab in traces:
+        groups.setdefault(lab, []).append((x, y))
+    groups = {k: np.asarray(v, float) for k, v in groups.items()}
+    curves = {lab: _dense_curve(geom[lab]) for lab in groups}
+
+    def per_point(p):
+        pose = {"P": p[:3], "rvec": p[3:6]}
+        span, vs = float(p[6]), float(p[7])
+        out = []
+        for lab, pts in groups.items():
+            c = _project_curve(curves[lab], pose, W, H, span, vs)
+            if len(c) == 0:
+                out.append(np.full(len(pts), 500.0)); continue
+            out.append(cKDTree(c).query(pts)[0])
+        return np.concatenate(out)
+
+    lo = np.array([-200, 0.5, -200, -np.pi, -np.pi, -np.pi, 120.0, 20.0])
+    hi = np.array([200, 120, 200, np.pi, np.pi, np.pi, 220.0, 200.0])
+    best = None
+    for sp, vs in ((span0, vspan0), (180.0, 180.0), (180.0, round(180.0 * H / W, 1)),
+                   (150.0, 70.0)):
+        x0 = np.clip(np.array([*pose0["P"], *pose0["rvec"], sp, vs], float),
+                     lo + 1e-6, hi - 1e-6)
+        try:
+            r = least_squares(per_point, x0, bounds=(lo, hi), method="trf",
+                              max_nfev=max_nfev, xtol=1e-10, ftol=1e-10,
+                              loss="soft_l1", f_scale=f_scale)
+        except Exception:
+            continue
+        d = per_point(r.x)
+        k90 = max(1, int(0.9 * len(d)))
+        trim = float(np.mean(np.sort(d)[:k90]))
+        if best is None or trim < best[0]:
+            best = (trim, r.x.copy(), d)
+    if best is None:
+        raise RuntimeError("pixel refinement failed")
+    trim, p, d = best
+    pose = {"P": p[:3], "rvec": p[3:6], "R": rotmat(p[3:6]).tolist()}
+    span, vs = float(p[6]), float(p[7])
+    per, idx = {}, 0
+    for lab, pts in groups.items():
+        dd = d[idx:idx + len(pts)]; idx += len(pts)
+        per[lab] = (len(dd), float(np.median(dd)), float(np.sqrt(np.mean(dd ** 2))))
+    med = float(np.median(d))
+    rms = float(np.sqrt(np.mean(d ** 2)))
+    return {"pose": pose, "span": span, "vspan": vs, "med_px": med,
+            "trim90_px": trim, "rms_px": rms, "per": per,
+            "n": int(len(d))}
+
+
 # ---- calibration contract (from the pencil-tool trace file) --------------- #
-CALIB_VERSION = 1
+# v2: span/vspan are solved (pixel-space fit), not assumed; quality is pixel-based.
+CALIB_VERSION = 2
 RMS_VALID_M = 1.0          # metric RMS below this -> calibration_valid
 
 # The traced goal lines are labelled by IMAGE side (calibrate.html: left/right
@@ -393,7 +494,49 @@ def calibration_from_traces(src, span=None, verbose=True):
         if verbose:
             print("  goal_line_left/right flipped to match the model's camera frame")
 
-    # quality / diagnostics from the line traces under the chosen pose
+    # ---- pixel-space refinement (accurate fit; see fit_pixel) --------------
+    # Reject labels the model cannot reconcile (e.g. a touchline traced above
+    # the horizon), then refit. This runs on the traces in pixel space, so what
+    # it optimises is exactly what the user sees in the overlay.
+    dropped = []
+    px = None
+    for _ in range(3):
+        try:
+            px = fit_pixel(traces, W, H, geom, pose, span, vspan_used)
+        except Exception as e:                              # noqa: BLE001
+            if verbose:
+                print(f"  pixel refinement unavailable ({e}); using metric fit")
+            px = None
+            break
+        meds_px = {l: v[1] for l, v in px["per"].items()}
+        if len(meds_px) <= 3:
+            break
+        overall_px = float(np.median(list(meds_px.values())))
+        worst = max(meds_px, key=meds_px.get)
+        n_goal = sum(1 for l in meds_px if l.startswith("goal_line_"))
+        last_goal = worst.startswith("goal_line_") and n_goal <= 1
+        if meds_px[worst] > max(PX_OUTLIER_MIN, PX_OUTLIER_FACTOR * overall_px) and not last_goal:
+            dropped.append(worst)
+            traces = [(x, y, l) for x, y, l in traces if l != worst]
+            pose = px["pose"]
+            span, vspan_used = px["span"], px["vspan"]
+            if verbose:
+                print(f"  dropped mistraced label {worst} "
+                      f"(median {meds_px[worst]:.1f} px vs {overall_px:.1f} px)")
+            continue
+        break
+    if px is not None:
+        pose = px["pose"]
+        span, vspan_used = px["span"], px["vspan"]
+        med_px = px["med_px"]
+        trim90_px = px["trim90_px"]
+        rms_px = px["rms_px"]
+    else:
+        med_px = trim90_px = float("nan")
+        rms_px = _rms_px(traces, pose, geom, W, H, span, vspan_used)
+    in_frame = _corners_in_frame(pose, W, H, span, vspan_used, dims)
+
+    # metric residual under the final pose (reported; not the validity gate)
     per = {}
     allres = []
     for x, y, l in traces:
@@ -405,25 +548,23 @@ def calibration_from_traces(src, span=None, verbose=True):
     allres = np.array(allres)
     med_m = float(np.median(allres))
     rms_m = float(np.sqrt(np.mean(allres ** 2)))
-    rms_px = _rms_px(traces, pose, geom, W, H, span, vspan_used)
-    meds = {l: float(np.median(v)) for l, v in per.items()}
-    overall = float(np.median(list(meds.values())))
-    suspect = sorted(l for l, m in meds.items() if m > max(4.0, 8.0 * overall))
-    if verbose and suspect:
-        print(f"  WARNING suspect line(s) {suspect} "
-              f"(median {[round(meds[l], 1) for l in suspect]} m vs {overall:.2f} m overall) "
-              f"- consider re-tracing")
+    used = {l: len(v) for l, v in per.items()}
 
-    # GEOMETRIC sanity gate: a correct pose renders the pitch inside the frame. A
-    # degenerate fit (traced points sliding along a near-infinite line) barely
-    # lowers the metre residual while putting the pitch somewhere off-screen, so
-    # the metre median alone can look fine on a useless pose. Require the pitch
-    # corners to project in (or just outside) the frame. (in_frame is the count
-    # already computed for the chosen parity.)
-    if verbose and in_frame < 2:
-        print(f"  WARNING fitted pitch does not render in frame ({in_frame}/4 corners) "
-              f"-> pose is degenerate")
-    valid = bool(med_m < RMS_VALID_M and len(allres) >= 12 and in_frame >= 2)
+    # a label whose pixels still do not sit on its curve is suspect even if the
+    # automatic drop did not trigger (e.g. it was the best of a bad bunch)
+    suspect = sorted(set(dropped))
+    if px is not None:
+        suspect += sorted(l for l, v in px["per"].items()
+                          if v[1] > max(PX_OUTLIER_MIN, PX_OUTLIER_FACTOR * med_px))
+    suspect = sorted(set(suspect))
+
+    # GEOMETRIC sanity gate: a correct pose renders the pitch inside the frame,
+    # and the traced pixels must actually land on the projected curves.
+    px_thresh = px_valid_threshold(W)
+    valid = bool(px is not None and med_px <= px_thresh
+                 and len(allres) >= 12 and in_frame >= 2)
+    span_at_bound = bool(span <= 120.01 or span >= 219.99
+                         or vspan_used <= 20.01 or vspan_used >= 199.99)
     out = {
         "version": CALIB_VERSION,
         "projection": "equirect",
@@ -437,17 +578,22 @@ def calibration_from_traces(src, span=None, verbose=True):
                         "rotation_vector": [float(v) for v in pose["rvec"]],
                         "R": rotmat(pose["rvec"]).tolist()},
         "traced_features": {"labels": sorted(used), "points_per_label": used,
-                            "label_parity": label_parity},
-        "quality": {"med_m": med_m, "rms_m": rms_m, "rms_px": rms_px,
+                            "label_parity": label_parity, "dropped_labels": dropped},
+        "quality": {"med_px": med_px, "trim90_px": trim90_px, "rms_px": rms_px,
+                    "med_m": med_m, "rms_m": rms_m,
                     "n_points": int(len(allres)), "valid": valid,
+                    "valid_threshold_px": px_thresh,
                     "valid_threshold_m": RMS_VALID_M,
-                    "suspect_labels": suspect, "corners_in_frame": in_frame},
+                    "label_med_px": {l: v[1] for l, v in (px or {"per": {}})["per"].items()},
+                    "suspect_labels": suspect, "corners_in_frame": in_frame,
+                    "span_at_bound": span_at_bound},
     }
     if verbose:
-        print(f"calibration: {len(allres)} pts from {sorted(used)}")
-        print(f"  pose P={np.round(pose['P'], 2)}  vspan={vspan_used:.1f} deg  "
-              f"median {med_m:.3f} m / rms {rms_m:.3f} m / "
-              f"{rms_px:.2f} px  -> calibration_valid={valid}")
+        print(f"calibration: {len(allres)} pts from {sorted(used)}"
+              + (f"  (dropped {dropped})" if dropped else ""))
+        print(f"  pose P={np.round(pose['P'], 2)}  span={span:.1f} vspan={vspan_used:.1f} deg  "
+              f"median_px={med_px:.2f} / med_m={med_m:.3f} / corners={in_frame}  "
+              f"-> calibration_valid={valid}")
     return out
 
 

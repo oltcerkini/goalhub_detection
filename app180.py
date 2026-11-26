@@ -132,8 +132,22 @@ async def calibrate(data: dict):
     if r.returncode != 0 or not cal_path.exists():
         raise HTTPException(500, (r.stderr or "calibration failed")[-1500:])
     cfg = json.loads(cal_path.read_text())
+    # draw the fitted pitch back onto the traced frame: the user should SEE the
+    # model lines on the paint before trusting any distances
+    overlay_url, model_curves = None, None
+    try:
+        sys.path.insert(0, str(BASE_DIR / "calib"))
+        from calib_overlay import render_overlay, geometry_polylines  # noqa: PLC0415
+        overlay_name = f"{video_id}_calib.jpg"
+        render_overlay(cfg, UPLOAD_DIR / f"{video_id}_frame.jpg", trace_path,
+                       UPLOAD_DIR / overlay_name)
+        overlay_url = f"/api/media/{overlay_name}"
+        model_curves = geometry_polylines(cfg)
+    except Exception:                                    # noqa: BLE001
+        pass
     return {"status": "ok", "quality": cfg.get("quality", {}),
-            "calibration_path": str(cal_path)}
+            "calibration_path": str(cal_path), "overlay_url": overlay_url,
+            "model_curves": model_curves}
 
 
 @app.post("/api/process")
@@ -151,7 +165,7 @@ async def process(data: dict):
 
     start = float(data.get("start", 0.0))
     frames = data.get("frames")            # None = whole clip
-    vspan = data.get("vspan")              # None = calibration vspan / 180
+    vspan = data.get("vspan")              # None = inferred from the content aspect
     out_path = OUTPUT_DIR / f"{video_id}_track.json"
     out_video = OUTPUT_DIR / f"{video_id}_players.mp4"
     out_follow = OUTPUT_DIR / f"{video_id}_follow.mp4"

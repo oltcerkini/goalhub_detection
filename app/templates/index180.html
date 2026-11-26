@@ -88,9 +88,10 @@ $('uploadBtn').onclick=async()=>{
     if(!r.ok) throw new Error(j.detail||('HTTP '+r.status));
     video_id=j.video_id; video_name=j.video_name;
     $('upStatus').innerHTML=`<span class="pill">${j.width}×${j.height}</span><span class="pill">layout ${j.layout}</span>`;
-    // very wide letterboxed strips (e.g. 3621x796) imply a ~40 deg vertical span
-    const implied=180*j.height/j.width;
-    $('vspan').value = implied < 60 ? Math.round(implied) : '';
+    // leave vspan empty: a valid calibration supplies the spans; otherwise the
+    // pipeline infers them from the content aspect. Hint shows that value.
+    const implied=Math.min(180, Math.max(20, Math.round(180*j.height/j.width)));
+    $('vspan').value = ''; $('vspan').placeholder = 'auto ('+implied+'°)';
     // embed the tracing tool, pointed at the uploaded frame and this app
     const q=new URLSearchParams({img:j.frame_url, video_id:j.video_id, api:location.origin, v:Date.now()});
     $('tool').src='/calib/tool?'+q.toString();
@@ -104,7 +105,9 @@ window.addEventListener('message',ev=>{
   if(!ev.data||ev.data.type!=='gh-calibrated') return;
   calibrated=true; $('step3').style.opacity=1; $('runBtn').disabled=false;
   const q=ev.data.quality||{}, valid=q.valid!==false;
-  $('upStatus').innerHTML+=`<div class="status ${valid?'ok':'warn'}">Calibrated — median ${q.med_m} m · valid=${q.valid} · corners ${q.corners_in_frame}/4${valid?'':' — adjust the trace if possible'}</div>`;
+  const px=q.med_px!=null?q.med_px.toFixed(1)+' px':'?';
+  const sus=(q.suspect_labels||[]).length?` · check ${q.suspect_labels.join(', ')}`:'';
+  $('upStatus').innerHTML+=`<div class="status ${valid?'ok':'warn'}">Calibrated — fit ${px} · valid=${q.valid} · corners ${q.corners_in_frame}/4${sus}${valid?'':' — re-trace the outlined lines if possible'}</div>`;
 });
 
 $('runBtn').onclick=async()=>{

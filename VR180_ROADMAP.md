@@ -194,6 +194,114 @@ Barca trace does not calibrate yet** — the fitted pose is degenerate.
   scale-aware ball retrain (needs more labels than 18) or a closer camera.**
   Tiling/zoom/high-res exhausted. Note: the far camera is not the product setup.
 
+**=== SESSION 2026-11-26 (cont.) — STEP 4 PROBE: ZOOM FINDS THE FAR BALL ===**
+Product constraint confirmed by the user: **no behind-goal camera** — ball/goal must
+work from the normal wide view ([[product-camera-setup]]). New module `ball_zoom.py`.
+Validated against the 18 hand labels (`annotation_goals/ball_gt (2).json`, Barca
+goal at 21:25 = 1285 s; labels are exact — the old script's fixed goal crop simply
+did not cover the ball, hence the earlier 0/9):
+- **Patch detection:** a ball detector on a 200 px crop upscaled 3× finds the ball at
+  **0.35–0.90 conf within 0–3 px of every positive label (9/9)**. The ball IS there;
+  it is just 8–16 px and too small for the full-frame pass.
+- **Grid zoom scan** (240 px windows, 120 px stride, 139 windows over the pitch
+  polygon, 3× upscale): candidates within 20 px of GT in **6/6** labeled frames of the
+  goal sequence (0–2 px), at ~2.1 s/frame. Candidate density ~14/frame after the
+  pitch-polygon filter — association, not detection, is the hard part.
+- **4 fps association** fails (constant-velocity/beam search: ball lost after the
+  first few seconds when it accelerates). Existing `BallTrailTracker` reaches 3/6.
+- **Dense local tracking** (one 300 px window around the constant-velocity prediction,
+  24 fps): **5/6 within 20 px (0–2 px on five labels)**, 27 ms/frame. Only the
+  near-goal frame at 1287 is 73 px off (occlusion/timing). This is the viable design:
+  cheap per-frame local tracking + periodic grid scan for re-acquisition.
+- Remaining work: acquisition policy (which grid candidate to lock onto — prefer
+  fast/persistent tracks, or restrict to goal areas), and goal-crossing logic in
+  metres using the now-valid calibration. Prototypes: `out/_zoom_eval.py`,
+  `out/_track_assoc.py`, `out/_dense_track.py`.
+- **Super-resolution / upscaler repos considered — rejected.** Zoom cannot add real
+  pixels (the ball is ~10×10 real px), and SR can hallucinate detail at that size;
+  the bottleneck is acquisition (14 candidates/frame), not resolution. Optional free
+  test next session: sweep zoom factor (2/3/4×) and imgsz on the 18 labels.
+
+**=== SESSION 2026-11-26 (cont.) — STEP 3: CALIBRATION FITTED IN PIXELS ===**
+Diagnosis: the old solver minimised **metres on the ground**, so far-field traces
+could be 100+ px wrong while the metric median looked fine (0.60 m / 144 px). The
+residual pattern was radial (centre <1 m, goal lines 80 m) → the assumed **span=180
+was wrong**, not just vspan. A span sweep with vspan free pinned the effective
+projection at ~149°×61° for the Barca clip (vspan re-fit alone barely moved; the
+horizontal span was the error).
+
+**New solver** (`spherical_calib.fit_pixel`, used by `calibration_from_traces`):
+- Minimises **traced-pixel → densely projected model-curve** distance (KD-tree),
+  optimising pose + span + vspan. Robust `soft_l1`.
+- Metric solve stays as the seed/parity chooser; pixel fit refines.
+- Auto-drops mistraced labels (median > max(10 px, 3× overall); never the last goal
+  line; max 2) and refits. A dropped line is still drawn in the overlay as a check.
+- Validity gate is now **pixel-based**: median ≤ 0.45 % of image width (~15 px at
+  3400) + corners ≥ 2 + ≥ 12 points. Contract version → **v2** (old v1 calibrations
+  keep their 180 assumption and are NOT trusted for detection spans).
+
+Measured:
+| trace | before | after |
+|---|---|---|
+| synthetic (pose known, span 180/180, 2 px noise) | 0.31 m / 9.5 px | **1.15 px**, span 179.6/178.5, pose ~0.2 m |
+| user trace `calib/calib_equirect.json` | 0.60 m / 144 px | **5.40 px**, span 148.7/61.1, med_m 0.16, drops `touchline_far`, valid |
+| app trace `7d1b8b0b_trace.json` | 3.64 m / 875 px, invalid | **10.92 px**, span 153.5/76.4, med_m 1.09, drops `goal_line_right`, valid |
+
+The dropped far touchline is still predicted onto the painted line in the overlay —
+an independent validation. The app trace's ~10 px floor is hand wobble on its
+145-point near edge (the tool drags a pen path).
+
+**Easier calibration (visual):** `calib/calib_overlay.py` draws the fitted pitch on
+the traced frame (JPEG via `/api/calibrate` → `overlay_url`) and returns
+`model_curves` so the trace tool draws the fit as **white dashed lines** in the
+canvas. The status shows `fit N px`, validity and suspected labels, so the user
+knows exactly which edge to redo. Paint-snap prototype: marginal (5.4→4.5 px on the
+good trace, no gain on the app trace) — **not adopted**.
+
+**Pipeline integration:** when a v2 calibration is valid, detection uses its solved
+span/vspan (26 vs 24 players in a 3-frame spot check) and the follow-cam projects
+with the same geometry. Explicit `--span/--vspan` win; v1/invalid calibrations fall
+back to span 180 + content-aspect vspan. The app's vspan field is now blank by
+default (placeholder shows the implied value). NOTE: a running `app180.py` must be
+restarted to pick up all of this.
+
+Tests: `test_metric_roi`, `test_vspan_tiling`, `test_ball_trail`, `test_trace_roi`
+ALL PASS. Debug/experiment scripts live in `out/_pixel_fit.py`, `out/_pxdist_lsq.py`,
+`out/_snap_paint.py` (git-ignored).
+
+**=== SESSION 2026-11-26 — STEP 2: SHORT SAMPLES ON ALL SIX CLIPS ===**
+Harness: `scripts/sample_clips.py` (12 frames, step 2, app-equivalent defaults, no
+calibration) → `out/short_samples/summary.json`. Player detections/frame (median):
+
+| clip | before | after |
+|---|---|---|
+| barca_04b_blue | 21.5 | 27.0 |
+| barca_04b_chall | **3.0** | 25.5 |
+| barca_11b_garnet | **8.5** | 22.0 |
+| night_wolves | **2.0** | 32.5 |
+| portrait_pasc | 23.0 | 23.0 |
+| stereo_viewpt | 15.5 | 15.5 |
+
+Two cheap bugs found and fixed (visual checks confirm boxes on players):
+1. **Vertical span was assumed 180 by default.** Tile projection with the wrong vspan
+   stretches players tall-and-thin in the tiles and the detector misses them
+   (Challenger: 3 → 29 at vspan 108). `vr180_pipeline` now infers vspan from the
+   content aspect (180·H/W, clamped 20–180) unless `--vspan` is given; the app
+   prefills the same value (was: only when implied < 60). Recorded as `vspan_source`.
+   **Implication for step 3:** the stored calibrations assume vspan 180, which for
+   the Barca clip's 2.13-aspect content is likely also wrong — revisit in calibration.
+   The pipeline now prefers the aspect value over the calibration's vspan.
+2. **Night auto-ROI destroyed recall.** The grass-colour hull segments only the two
+   floodlit patches (x≈0–1115 of 3622) and kept 1–2 of ~28 detections. New guard:
+   a grass ROI keeping < 15 % of the frame's detections (≥ 8 detections) is ignored
+   (`roi_mode = "grass-rejected"`). User traces are still authoritative.
+
+Still open (not cheap): day-clip ball 0/12 (known far-ball, step 4); portrait/stereo
+content implies vspan > 180 (clamped to 180 — see step 3 geometry); occasional
+duplicate boxes near dense clusters. Unit tests still pass (`test_vspan_tiling`,
+`test_ball_trail`, `test_trace_roi`, `test_metric_roi`); full app-path smoke test with
+calibration+trace+render+follow OK (23–24 players/frame, follow view sane).
+
 **=== SESSION 2026-11-25 (end) — RESUME STATE ===**
 - **Virtual follow-camera + MP4 DONE (task #17):** `vr180_pipeline.py --render-follow`
   (smoothed pose → `equirect_to_perspective`, FOV 70, 1280×720, h264); app `/api/follow/{id}`
@@ -485,6 +593,13 @@ Remaining options: (a) accept 180 and validate per clip via the fit; (b) get the
 camera's real vertical FOV from the user/manufacturer; (c) constrain vspan with
 a prior (square-pixel assumption: vspan = span * H / W — currently contradicts
 the Barca round-circle observation, so unresolved).
+
+**SUPERSEDED 2026-11-26 (detection):** the default vspan = 180 was badly wrong for
+detection — aspect-derived vspan (option c) recovers 2.5–16× more players per frame
+and is now the pipeline default (see the 2026-11-26 session block). The "round
+centre circle at vspan 180" observation above should be re-checked, since a 2.13
+aspect under a 180×180 equirect implies squeezed/non-square pixels; calibration
+(step 3) must settle it.
 
 **Second finding:** one in six clips is **stereo** (SBS) — `equirect.py` now
 auto-detects and de-stacks (takes one eye).

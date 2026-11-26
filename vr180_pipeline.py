@@ -66,6 +66,17 @@ ENHANCE = "auto"
 ENHANCE_DARK_MEAN = 70.0      # night clip content ~52; overcast day ~92
 ENHANCE_DARK_FRAC = 0.45
 
+# Vertical span from content aspect (square-pixel prior). A 180-wide clip whose
+# content is twice as tall as wide is NOT 180 tall: assuming it is stretches
+# players tall-and-thin in the tile projection and the detector misses most of
+# them (measured: 3 -> 29 players/frame on Barca-Challenger at vspan 180 vs 108).
+VSPAN_MIN, VSPAN_MAX = 20.0, 180.0
+GRASS_ROI_MIN_KEEP = 0.15     # auto-ROI keeping less than this share of detections is broken
+
+
+def _auto_vspan(eq_w, eq_h):
+    return round(float(min(VSPAN_MAX, max(VSPAN_MIN, 180.0 * eq_h / eq_w))), 2)
+
 
 def _enhance_frame(frame, mode):
     """CLAHE on the luminance channel. 'auto' only fires on dark frames."""
@@ -154,7 +165,7 @@ def _transcode_h264(path, verbose=True):
     return path
 
 
-def run(video, calibration=None, span=180.0, fov=60.0, start_s=0.0, max_frames=None,
+def run(video, calibration=None, span=None, fov=60.0, start_s=0.0, max_frames=None,
         step=1, ball=True, roi=True, region=None, render=None, follow=None, trace=None,
         roi_margin_frac=0.20, track_activation=TRACK_ACTIVATION,
         track_min_hits=TRACK_MIN_HITS, vspan=None, enhance=ENHANCE, verbose=True):
@@ -169,9 +180,33 @@ def run(video, calibration=None, span=180.0, fov=60.0, start_s=0.0, max_frames=N
             trace = cand
     if trace and not isinstance(trace, dict):
         trace = json.loads(Path(trace).read_text())
-    if vspan is None:
-        vspan = float(cal.get("vspan_deg", 180.0)) if cal else 180.0
-    vspan = float(vspan)
+    # Projection spans: a valid calibration has solved them from the traced
+    # pitch (the content is a cropped window, not reliably 180x180). Explicit
+    # arguments win; otherwise prefer the calibration, then a 180 span and the
+    # content-aspect vspan. Detection is very sensitive to vspan (wrong values
+    # stretch players tall-and-thin in the tiles).
+    cal_valid = bool(cal and cal.get("quality", {}).get("valid"))
+    # Only v2+ calibrations solved the spans from the pitch; v1 stored a vspan
+    # of 180, which is wrong for these cropped clips and hurts detection.
+    cal_spans = cal_valid and int(cal.get("version", 1)) >= 2
+    if span is not None:
+        span = float(span)
+        span_source = "explicit"
+    elif cal_spans:
+        span = float(cal.get("span_deg", 180.0))
+        span_source = "calibration"
+    else:
+        span = 180.0
+        span_source = "default"
+    if vspan is not None:
+        vspan = float(vspan)
+        vspan_source = "explicit"
+    elif cal_spans and cal.get("vspan_deg") is not None:
+        vspan = float(cal["vspan_deg"])
+        vspan_source = "calibration"
+    else:
+        vspan = None                 # resolved from the first frame's content aspect
+        vspan_source = "auto"
     player_model = __import__("ultralytics").YOLO(PLAYER_MODEL)
     ball_model = __import__("ultralytics").YOLO(BALL_MODEL) if ball else None
     ball_tracker = (BallTrailTracker(gate_px=100.0, min_hits=3, max_missed=10)
@@ -186,7 +221,7 @@ def run(video, calibration=None, span=180.0, fov=60.0, start_s=0.0, max_frames=N
     fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
     cap.set(cv2.CAP_PROP_POS_MSEC, start_s * 1000.0)
 
-    grid = build_grid(span, fov, vspan)
+    grid = None
     frames, ball_trail = [], []
     writer = None
     fwriter = None
@@ -211,6 +246,9 @@ def run(video, calibration=None, span=180.0, fov=60.0, start_s=0.0, max_frames=N
         enh_counts[enh] = enh_counts.get(enh, 0) + 1
         if W is None:
             H, W = content.shape[:2]
+            if vspan is None:
+                vspan = _auto_vspan(W, H)
+            grid = build_grid(span, fov, vspan)
             metric = make_metric(cal, W, H)
             # The traced outline sits on the paint, so prefer it over the fitted
             # pose (ill-conditioned on touchline cameras). Grass is the last resort.
@@ -245,8 +283,15 @@ def run(video, calibration=None, span=180.0, fov=60.0, start_s=0.0, max_frames=N
                                             m["bbox"][3])]
             roi_mode = "pose"
         elif roi_poly is not None:
-            merged, _ = roi_filter(merged, roi_poly)
-            roi_mode = "grass"
+            kept, _ = roi_filter(merged, roi_poly)
+            if len(merged) >= 8 and len(kept) < max(3, GRASS_ROI_MIN_KEEP * len(merged)):
+                # The colour-derived hull missed most of the pitch (night/floodlit
+                # frames segment only the lit patches). Dropping real players is
+                # worse than keeping a few off-pitch ones.
+                roi_mode = "grass-rejected"
+            else:
+                merged = kept
+                roi_mode = "grass"
 
         # track
         tracks = []
@@ -387,6 +432,7 @@ def run(video, calibration=None, span=180.0, fov=60.0, start_s=0.0, max_frames=N
     out = {
         "version": TRACK_VERSION, "mode": MODE, "video": str(video),
         "image_size": [W, H], "span_deg": span, "vspan_deg": vspan,
+        "span_source": span_source, "vspan_source": vspan_source,
         "enhance": enhance, "enhance_counts": enh_counts,
         "layout": meta["layout"], "region": meta["region"],
         "calibration_valid": bool(cal and cal.get("quality", {}).get("valid", False)),
@@ -405,7 +451,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--video", required=True)
     ap.add_argument("--calibration", default=None)
-    ap.add_argument("--span", type=float, default=180.0)
+    ap.add_argument("--span", type=float, default=None,
+                    help="horizontal span (default: calibration span, else 180)")
     ap.add_argument("--start", type=float, default=0.0)
     ap.add_argument("--frames", type=int, default=None)
     ap.add_argument("--step", type=int, default=1)
@@ -421,7 +468,8 @@ def main():
     ap.add_argument("--track-min-hits", type=int, default=TRACK_MIN_HITS,
                     help="frames a track must appear before it is emitted")
     ap.add_argument("--vspan", type=float, default=None,
-                    help="vertical span of the content (default: calibration vspan_deg or 180)")
+                    help="vertical span of the content (default: calibration vspan_deg, "
+                         "else inferred from the content aspect)")
     ap.add_argument("--enhance", choices=["none", "clahe", "auto"], default=ENHANCE,
                     help="low-light enhancement (auto = CLAHE only on dark frames)")
     ap.add_argument("--render", default=None, help="write an annotated mp4 here")

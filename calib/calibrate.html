@@ -146,6 +146,7 @@ let selected = null;    // type of the shape being edited
 let drag = null;        // {kind:'anchor'|'handle', type, i[, which]}
 let panning = null;
 let guideVisible = true;
+let fitModel = null;    // projected model curves from the last calibration
 
 const getShape = t => shapes.find(s => s.type === t);
 const newAnchor = (x,y) => ({x,y, ix:0, iy:0, ox:0, oy:0});
@@ -279,6 +280,26 @@ function draw(){
       ctx.fillText(String(k+1), sx, sy+0.5);
     });
     ctx.textAlign='left'; ctx.textBaseline='alphabetic';
+  }
+
+  // fitted model from the last calibration: dashed white. If these land on the
+  // painted lines, the calibration is good — no numbers needed.
+  if (fitModel){
+    ctx.setLineDash([7/view.s, 6/view.s]);
+    ctx.strokeStyle='#ffffff'; ctx.lineWidth=1.5/view.s;
+    for (const lab in fitModel){
+      const pts = fitModel[lab]; let prev = null;
+      ctx.beginPath();
+      for (const p of pts){
+        if (!p || !isFinite(p[0]) || !isFinite(p[1])) { prev = null; continue; }
+        if (prev && Math.hypot(p[0]-prev[0], p[1]-prev[1]) > 150) { ctx.moveTo(p[0],p[1]); }
+        else if (prev) { ctx.lineTo(p[0],p[1]); }
+        else { ctx.moveTo(p[0],p[1]); }
+        prev = p;
+      }
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
   }
 
   drawLabels();
@@ -587,8 +608,13 @@ $('save').onclick = async () => {
     const j = await r.json();
     if (!r.ok) throw new Error(j.detail || ('HTTP '+r.status));
     const q = j.quality || {};
-    const msg = `Calibrated — median ${q.med_m} m · valid=${q.valid} · corners ${q.corners_in_frame}/4`;
+    const sus = (q.suspect_labels || []);
+    const msg = `Calibrated — fit ${q.med_px != null ? q.med_px.toFixed(1) : '?'} px · `
+      + `valid=${q.valid} · ${q.corners_in_frame}/4 corners`
+      + (sus.length ? ` · check: ${sus.join(', ')}` : '')
+      + ' — white dashed = fitted pitch; it should sit on the paint.';
     gb.textContent = msg;
+    if (j.model_curves){ fitModel = j.model_curves; draw(); }
     if (window.parent !== window)
       window.parent.postMessage({type:'gh-calibrated', quality:q}, '*');
     else alert(msg);
