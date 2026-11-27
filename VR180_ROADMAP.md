@@ -275,6 +275,15 @@ dedupes one event per side per 5 s (prefers lock-on), and adds
 event at 1287.71 s (approach 312 px/s). Note: 4K player tiling dominates runtime
 (~1.5 s/frame); the acquisition scan adds ~10 s once.
 
+**5. App wiring (`app180.py` + `app/templates/index180.html`).** `/api/process`
+auto-adds `--goals` when the calibration is v2-valid AND the saved trace contains
+`goal_left`/`goal_right` (the anchor requirement); the results panel prints
+"Goals: N — left goal at Xs". Can be forced with body `{"goals": true}`. The stored
+app calibrations are all v1 (stale), so recalibrating in the app upgrades them to v2
+(pixel refinement already solves span/vspan even without `fit_vspan`) and switches
+goals on. Caveat: the app's stored clip is ~31 s, so the goal path was syntax-checked
+but NOT exercised through the browser end-to-end.
+
 **=== SESSION 2026-11-26 (cont.) — STEP 4 PROBE: ZOOM FINDS THE FAR BALL ===**
 Product constraint confirmed by the user: **no behind-goal camera** — ball/goal must
 work from the normal wide view ([[product-camera-setup]]). New module `ball_zoom.py`.

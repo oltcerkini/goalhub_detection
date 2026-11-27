@@ -50,6 +50,11 @@ ball's identity *inside the net* is not verified. That is the next thing to hard
   emits `goal_events` (plus the lock-on trail). Verified end-to-end on the clip:
   acquired the ball itself at 1283.4 s and reported **one left-goal event** at the
   crossing (approach ~300 px/s). Off by default, so existing behaviour is unchanged.
+- **App wiring:** `app180` auto-enables `--goals` only when the calibration is
+  v2-valid **and** the trace includes the goal frames, and the results panel shows
+  "Goals: N — …". Existing saved calibrations are v1, so **recalibrate in the app**
+  to switch it on. (The app's stored clip is a 30 s excerpt, so I couldn't exercise
+  the goal path through the UI without uploading the full video.)
 
 **Next, in order:**
 1. **False-positive pass**: run `--goals` on the other clips / non-goal stretches

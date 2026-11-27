@@ -159,6 +159,24 @@ async def process(data: dict):
     cal_path = CALIB_DIR / f"{video_id}.json"
     if not cal_path.exists():
         raise HTTPException(400, "Calibrate first — no calibration for this video.")
+    try:
+        cal = json.loads(cal_path.read_text())
+    except Exception:
+        cal = {}
+    # goal detection needs a v2 calibration (solved spans) AND traced goal frames
+    cal_v2 = (bool(cal.get("quality", {}).get("valid"))
+              and int(cal.get("version", 1)) >= 2)
+    trace_p = CALIB_DIR / f"{video_id}_trace.json"
+    trace_has_goals = False
+    if trace_p.exists():
+        try:
+            labs = {ln.get("label") for ln in json.loads(trace_p.read_text()).get("lines", [])}
+            trace_has_goals = bool(labs & {"goal_left", "goal_right"})
+        except Exception:
+            pass
+    want_goals = data.get("goals")
+    if want_goals is None:
+        want_goals = cal_v2 and trace_has_goals
     video_path = UPLOAD_DIR / video_name
     if not video_path.exists():
         raise HTTPException(400, "Video file not found")
@@ -183,13 +201,14 @@ async def process(data: dict):
         meta_p = UPLOAD_DIR / f"{video_id}.meta.json"
         if meta_p.exists():
             cmd += ["--region", *[str(v) for v in json.loads(meta_p.read_text())["region"]]]
-        trace_p = CALIB_DIR / f"{video_id}_trace.json"
         if trace_p.exists():
             cmd += ["--trace", str(trace_p)]
         if frames:
             cmd.extend(["--frames", str(int(frames))])
         if vspan:
             cmd.extend(["--vspan", str(float(vspan))])
+        if want_goals:
+            cmd.append("--goals")
         tasks[task_id]["status"] = "processing"
         tasks[task_id]["started_at"] = time.time()
         try:

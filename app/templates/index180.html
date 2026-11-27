@@ -144,7 +144,11 @@ async function showResults(id){
     const first=(ps[0]&&ps[0].pitch_m)?`x ${ps[0].pitch_m[0].toFixed(1)}, z ${ps[0].pitch_m[1].toFixed(1)}`:'—';
     rows+=`<tr><td>${i+1}</td><td>${(f.t||0).toFixed(2)}s</td><td>${ps.length}</td><td>${first}</td></tr>`;
   });
-  $('out').innerHTML=
+  const ge=res.goal_events||[];
+  const goalHtml = ge.length
+    ? `<div class="status ok" style="margin-top:8px">Goals: ${ge.length} — ${ge.map(e=>`${e.side} goal at ${e.t_start.toFixed(1)}s`).join(' · ')}</div>`
+    : (res.goals_enabled ? `<div class="status warn" style="margin-top:8px">Goals: none detected in this range.</div>` : '');
+  $('out').innerHTML= goalHtml +
     `<video src="/api/video/${id}" controls autoplay loop muted playsinline
        style="width:100%;max-width:1200px;border-radius:8px;border:1px solid var(--line);margin-top:12px;background:#000"></video>`+
     `<div class="mut" style="margin-top:6px">annotated video — every player boxed with its track id and pitch position (m)</div>`+
