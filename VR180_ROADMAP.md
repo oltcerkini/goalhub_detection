@@ -224,10 +224,14 @@ weighted ones).
 now threaded through (v2 clips have vspan≈50). Added `goal_mouth_polygon`,
 `in_goal_mouth_px`, `detect_goals_px`, and `detect_goal_entries`. Lateral width
 stays from the GROUND position (ray-plane lateral is only valid ON the plane; using
-it broke the wide-shot case). `detect_goal_entries` groups inside-mouth points
-allowing ~0.7 s gaps (the ball pins to goal-line pixels and flickers), requires a
-fast approach from OUTSIDE the mouth, and reports one event per entry. Rationale for
-the approach gate: a keeper standing in the mouth has no approach.
+it broke the wide-shot case). `detect_goal_entries` is now a **goal-line CROSSING**
+rule: find sign changes of (ground x − goal line), interpolate the ray-plane (y, z)
+to the crossing instant, and accept iff that point is inside the posts and under the
+bar. This is the only place the ray-plane lateral is valid (before/behind the ball
+it is just a projection). It also requires the crossing to be INTO the goal and a
+plausible approach speed, and keeps the FIRST inward crossing per ~6 s. Adversarial
+tests: wide-fast, over-bar, static keeper, keeper shuffle, ball crossing far in front
+of the goal → all 0 events; roll-in and enter-then-exit → 1.
 
 **3. Lock-on acquisition + dense tracking (`ball_lockon.py`).**
 Grid scan over the whole content (tiling restricted to the pitch polygon DROPS the
@@ -246,12 +250,14 @@ Measured on the 18-label Barca sequence (t=1273–1308), **no GT seeding**:
   goal. The tracker then latches a static high-conf object near the goal for the
   rest of the clip (no re-acquire wired into the dense loop). Labels 1297–1307
   (later play) miss.
-- Goal entry rule on this trail: **exactly one event, left (image-right) goal,
-  t≈1287.7 s, approach 364 px/s, z=-0.15 m; zero on the right goal.** This matches
-  the labelled goal. Caveat: event identity at the net is not verified because of
-  the occlusion — corroborated by approach + mouth occupancy, not by tracking the
-  ball into the net. This partly revisits the "tiling/zoom exhausted" note above:
-  general tiling fails, but motion-ranked acquisition + dense local tracking works.
+- Goal crossing rule on this trail: **exactly one event, left (image-right) goal,
+  t≈1287.56 s, approach 364 px/s, ray-plane z=-2.64 m (inside the 3.66 m posts); zero
+  on the right goal.** This matches the labelled goal. Caveat: the ball is occluded
+  at the line, so the exact crossing is interpolated between nearby detections
+  (including the object the tracker shifted onto); the crossing z/y are physically
+  plausible and the timing matches. This partly revisits the "tiling/zoom exhausted"
+  note above: general tiling fails, but motion-ranked acquisition + dense local
+  tracking works.
 
 Debug/prototypes: `out/_lockon_eval.py`, `out/_goal_rule_eval.py`,
 `out/_acq_scans.json`, `out/_lockon_trail.json` (git-ignored). Tests:

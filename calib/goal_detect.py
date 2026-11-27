@@ -168,63 +168,72 @@ def detect_goals_px(trail, pose, side, W, H, span=180.0, vspan=180.0,
 
 
 def detect_goal_entries(trail, pose, side, W, H, span=180.0, vspan=180.0, fps=24.0,
-                        gap_s=0.7, min_dur_s=0.2, min_inside_frac=0.5,
-                        depth_gate_m=15.0, inset_frac=0.10, approach_s=1.5,
-                        min_approach_px_s=25.0):
-    """Gap-tolerant goal-ENTRY rule (one event per ball entering the mouth).
+                        crossing_band_m=8.0, approach_s=1.5,
+                        min_approach_px_s=25.0, dedupe_s=6.0, height_m=None,
+                        ground_tol_m=0.25):
+    """Goal = the ball CROSSES the goal-line plane, judged AT the crossing.
 
-    At the far goal the ball is pinned to the goal-line pixels, so inside/outside
-    flickers frame to frame; strict consecutive-frame runs split up. Instead,
-    group inside points into episodes allowing gaps of `gap_s`, keep episodes
-    that persist and are mostly inside, and require the ball to have APPROACHED
-    from outside the mouth at speed (this is what rules out a keeper who is
-    simply standing in the goal). The event is reported at the episode start.
+    The ball's lateral/height are only correct via the ray-plane intersection
+    exactly where the ball is at the plane; before/behind, that intersection is a
+    projection and can sit inside the mouth for a wide ball (or outside for a
+    real goal). So bracket each sign change of (ground x - goal line) with two
+    near-line samples (within `crossing_band_m`), interpolate the ray-plane (y, z)
+    to the crossing instant, and accept it as a goal iff that point is inside the
+    posts and under the bar. Requiring a plausible approach speed rejects a
+    stationary false positive drifting across the line due to pixel noise.
     trail: detected points only, as (x_eq, y_eq, frame_idx, conf).
     """
-    poly = goal_mouth_polygon(pose, side, W, H, span, vspan)
     px = goal_line_x(side)
-    pts = []
+    hgt = GOAL_HEIGHT if height_m is None else height_m
+    P = []
     for x, y, f, c in sorted(trail, key=lambda z: z[2]):
         xm, _ = equirect_to_pitch(x, y, pose, W, H, span, vspan)
-        xm = float(np.ravel(xm)[0])
-        near = np.isfinite(xm) and abs(xm - px) <= depth_gate_m
-        inside = bool(near and in_goal_mouth_px(x, y, poly, inset_frac))
-        pts.append((f / fps, inside, float(c), float(x), float(y)))
-    episodes, cur = [], []
-    for p in pts:
-        if not p[1]:
-            continue
-        if cur and p[0] - cur[-1][0] > gap_s:
-            episodes.append(cur)
-            cur = []
-        cur.append(p)
-    if cur:
-        episodes.append(cur)
+        ya, za = ray_plane_point(x, y, pose, px, W, H, span, vspan)
+        P.append({"t": f / fps, "x": float(x), "y": float(y), "c": float(c),
+                  "xm": float(np.ravel(xm)[0]), "ya": float(np.ravel(ya)[0]),
+                  "za": float(np.ravel(za)[0])})
 
-    events = []
-    for ep in episodes:
-        t0, t1 = ep[0][0], ep[-1][0]
-        if t1 - t0 < min_dur_s:
+    raw = []
+    for a, b in zip(P, P[1:]):
+        da, db = a["xm"] - px, b["xm"] - px
+        if not (np.isfinite(da) and np.isfinite(db)
+                and abs(da) <= crossing_band_m and abs(db) <= crossing_band_m):
             continue
-        span_pts = [p for p in pts if t0 <= p[0] <= t1]
-        frac = sum(p[1] for p in span_pts) / max(1, len(span_pts))
-        if frac < min_inside_frac:
+        if da == 0 or da * db > 0:          # no sign change between them
             continue
-        pre = [p for p in pts if t0 - approach_s <= p[0] < t0]
-        sp = [np.hypot(b[3] - a[3], b[4] - a[4]) / (b[0] - a[0])
-              for a, b in zip(pre, pre[1:]) if b[0] - a[0] > 1e-3]
+        # only count a crossing INTO the goal (pitch -> behind), not a ball coming
+        # back out. Left goal sits at -x (pitch on +x); right goal at +x.
+        inward = (da > 0 > db) if side == "left" else (da < 0 < db)
+        if not inward:
+            continue
+        fr = (px - a["xm"]) / (b["xm"] - a["xm"])
+        if not (0.0 <= fr <= 1.0):
+            continue
+        z = a["za"] + fr * (b["za"] - a["za"])
+        yv = a["ya"] + fr * (b["ya"] - a["ya"])
+        tc = a["t"] + fr * (b["t"] - a["t"])
+        # a grounded ball's ray-plane height floats around 0; allow a little
+        # below-ground slack so rounding does not reject it
+        if not (np.isfinite(z) and np.isfinite(yv)
+                and abs(z) <= GOAL_HALF_WIDTH and -ground_tol_m <= yv <= hgt):
+            continue
+        pre = [p for p in P if tc - approach_s <= p["t"] <= tc]
+        sp = [np.hypot(q["x"] - p["x"], q["y"] - p["y"]) / (q["t"] - p["t"])
+              for p, q in zip(pre, pre[1:]) if q["t"] - p["t"] > 1e-3]
         approach = max(sp) if sp else 0.0
-        if approach < min_approach_px_s or not any(not p[1] for p in pre):
+        if approach < min_approach_px_s:
             continue
-        yapp, zapp = ray_plane_point(
-            float(np.mean([p[3] for p in ep])), float(np.mean([p[4] for p in ep])),
-            pose, px, W, H, span, vspan)
-        events.append({"side": side, "t_start": t0, "t_end": t1,
-                       "n_frames": len(ep), "inside_frac": frac,
-                       "approach_px_s": approach, "max_conf": max(p[2] for p in ep),
-                       "mean_y_m": float(np.ravel(yapp)[0]),
-                       "mean_z_m": float(np.ravel(zapp)[0]),
-                       "ball_eq": (ep[0][3], ep[0][4])})
+        raw.append({"side": side, "t_start": tc, "t_end": tc, "n_frames": 1,
+                    "inside_frac": 1.0, "approach_px_s": approach,
+                    "max_conf": max(a["c"], b["c"]),
+                    "mean_y_m": yv, "mean_z_m": z, "ball_eq": (a["x"], a["y"])})
+
+    raw.sort(key=lambda e: e["t_start"])
+    events = []
+    for e in raw:                            # the FIRST inward crossing is the goal
+        if events and e["t_start"] - events[-1]["t_start"] < dedupe_s:
+            continue
+        events.append(e)
     return events
 
 
