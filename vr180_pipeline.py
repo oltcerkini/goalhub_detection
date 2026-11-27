@@ -37,7 +37,8 @@ from spherical_tiling import (build_grid, tile_equirect, merge_to_equirect,   # 
                               pitch_polygon_from_trace, trace_roi_filter)
 from player_tracker import PlayerTracker                    # noqa: E402
 from ball_trail import BallTrailTracker                     # noqa: E402
-from ball_lockon import BallLockOn, pitch_polygon as calib_pitch_polygon  # noqa: E402
+from ball_lockon import (BallLockOn, pitch_polygon as calib_pitch_polygon,  # noqa: E402
+                         pitch_roi_filter)
 from goal_detect import detect_goal_entries                 # noqa: E402
 from spherical_projection import equirect_to_perspective    # noqa: E402
 from virtual_camera import compute_camera_pose              # noqa: E402
@@ -269,7 +270,8 @@ def run(video, calibration=None, span=None, fov=60.0, start_s=0.0, max_frames=No
                     gp = None
                 goal_pose = {"P": np.array(cal["camera_pose"]["position_m"], float),
                              "rvec": np.array(cal["camera_pose"]["rotation_vector"], float)}
-                lock = BallLockOn(ball_model, W, H, pitch_poly=gp)
+                lock = BallLockOn(ball_model, W, H, pitch_poly=gp,
+                                  candidate_filter=pitch_roi_filter(cal, W, H))
             # The traced outline sits on the paint, so prefer it over the fitted
             # pose (ill-conditioned on touchline cameras). Grass is the last resort.
             trace_poly = pitch_polygon_from_trace(trace, W, H) if trace else None
@@ -287,8 +289,10 @@ def run(video, calibration=None, span=None, fov=60.0, start_s=0.0, max_frames=No
                 if rec is not None and rec[4]:
                     lock_trail.append([round(t, 3), round(rec[1], 1),
                                        round(rec[2], 1), round(rec[3], 3)])
-            elif acq_attempts < 3 and t >= scan_pause_until:
-                if not scan_times or t - scan_times[-1] >= 0.3:
+            elif acq_attempts < 12 and t >= scan_pause_until:
+                # retry after loss as well as at the start; each acquisition is
+                # ~10 s of scanning, so keep a global cap on attempts.
+                if not scan_times or t - scan_times[-1] >= 0.4:
                     scan_buf.append(lf)
                     scan_times.append(t)
                 if len(scan_buf) >= 5:

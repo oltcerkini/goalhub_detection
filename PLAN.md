@@ -50,6 +50,13 @@ ball's identity *inside the net* is not verified. That is the next thing to hard
   emits `goal_events` (plus the lock-on trail). Verified end-to-end on the clip:
   acquired the ball itself at 1283.4 s and reported **one left-goal event** at the
   crossing (approach ~300 px/s). Off by default, so existing behaviour is unchanged.
+- **False-positive pass + acquisition hardening:** on ordinary stretches of the full
+  match (no goal) the ball is now acquired and followed for **97 % of frames with
+  zero goals fired**. This pass also caught a real weakness — the auto-find sometimes
+  locked a linesman/foot instead of the ball — so acquisition now only considers
+  confident objects well inside the pitch. After the fix the goal clip still gives its
+  one correct goal. (No ground truth for the ordinary stretches, so this is
+  encouraging, not proof.)
 - **App wiring:** `app180` auto-enables `--goals` only when the calibration is
   v2-valid **and** the trace includes the goal frames, and the results panel shows
   "Goals: N — …". Existing saved calibrations are v1, so **recalibrate in the app**

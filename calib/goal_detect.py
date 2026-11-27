@@ -168,8 +168,8 @@ def detect_goals_px(trail, pose, side, W, H, span=180.0, vspan=180.0,
 
 
 def detect_goal_entries(trail, pose, side, W, H, span=180.0, vspan=180.0, fps=24.0,
-                        crossing_band_m=8.0, approach_s=1.5,
-                        min_approach_px_s=25.0, dedupe_s=6.0, height_m=None,
+                        crossing_band_m=8.0, max_gap_s=0.6, max_cross_px_s=1200.0,
+                        min_approach_px_s=20.0, dedupe_s=6.0, height_m=None,
                         ground_tol_m=0.25):
     """Goal = the ball CROSSES the goal-line plane, judged AT the crossing.
 
@@ -217,14 +217,17 @@ def detect_goal_entries(trail, pose, side, W, H, span=180.0, vspan=180.0, fps=24
         if not (np.isfinite(z) and np.isfinite(yv)
                 and abs(z) <= GOAL_HALF_WIDTH and -ground_tol_m <= yv <= hgt):
             continue
-        pre = [p for p in P if tc - approach_s <= p["t"] <= tc]
-        sp = [np.hypot(q["x"] - p["x"], q["y"] - p["y"]) / (q["t"] - p["t"])
-              for p, q in zip(pre, pre[1:]) if q["t"] - p["t"] > 1e-3]
-        approach = max(sp) if sp else 0.0
-        if approach < min_approach_px_s:
+        # motion is judged on the crossing BRACKET itself: a re-acquire jump can
+        # put two samples either side of the line with a huge gap/speed — that is
+        # not a ball crossing. A real crossing must be a smooth, plausible step.
+        gap = b["t"] - a["t"]
+        if gap <= 1e-3 or gap > max_gap_s:
+            continue
+        cross_speed = np.hypot(b["x"] - a["x"], b["y"] - a["y"]) / gap
+        if cross_speed > max_cross_px_s or cross_speed < min_approach_px_s:
             continue
         raw.append({"side": side, "t_start": tc, "t_end": tc, "n_frames": 1,
-                    "inside_frac": 1.0, "approach_px_s": approach,
+                    "inside_frac": 1.0, "approach_px_s": cross_speed,
                     "max_conf": max(a["c"], b["c"]),
                     "mean_y_m": yv, "mean_z_m": z, "ball_eq": (a["x"], a["y"])})
 

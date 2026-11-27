@@ -228,10 +228,12 @@ it broke the wide-shot case). `detect_goal_entries` is now a **goal-line CROSSIN
 rule: find sign changes of (ground x − goal line), interpolate the ray-plane (y, z)
 to the crossing instant, and accept iff that point is inside the posts and under the
 bar. This is the only place the ray-plane lateral is valid (before/behind the ball
-it is just a projection). It also requires the crossing to be INTO the goal and a
-plausible approach speed, and keeps the FIRST inward crossing per ~6 s. Adversarial
-tests: wide-fast, over-bar, static keeper, keeper shuffle, ball crossing far in front
-of the goal → all 0 events; roll-in and enter-then-exit → 1.
+it is just a projection). It requires the crossing to be INTO the goal and the
+BRACKET between the two samples to be a smooth, plausible step (gap <= 0.6 s, speed
+in [20, 1200] px/s) — this rejects a spurious "crossing" created by a re-acquire jump
+across the line. It keeps the FIRST inward crossing per ~6 s. Adversarial tests:
+wide-fast, over-bar, static keeper, keeper shuffle, ball crossing far in front of the
+goal → all 0 events; roll-in and enter-then-exit → 1.
 
 **3. Lock-on acquisition + dense tracking (`ball_lockon.py`).**
 Grid scan over the whole content (tiling restricted to the pitch polygon DROPS the
@@ -251,8 +253,10 @@ Measured on the 18-label Barca sequence (t=1273–1308), **no GT seeding**:
   rest of the clip (no re-acquire wired into the dense loop). Labels 1297–1307
   (later play) miss.
 - Goal crossing rule on this trail: **exactly one event, left (image-right) goal,
-  t≈1287.56 s, approach 364 px/s, ray-plane z=-2.64 m (inside the 3.66 m posts); zero
-  on the right goal.** This matches the labelled goal. Caveat: the ball is occluded
+  t≈1287.56 s, ray-plane z=-2.64 m (inside the 3.66 m posts); zero on the right
+  goal.** (With the bracket-speed gate the pipeline's own trail gives one left event
+  at 1287.69 s, z=-2.95 m, 36 px/s — the re-acquire jump at ~1286 is no longer read
+  as a crossing.) This matches the labelled goal. Caveat: the ball is occluded
   at the line, so the exact crossing is interpolated between nearby detections
   (including the object the tracker shifted onto); the crossing z/y are physically
   plausible and the timing matches. This partly revisits the "tiling/zoom exhausted"
@@ -283,6 +287,26 @@ app calibrations are all v1 (stale), so recalibrating in the app upgrades them t
 (pixel refinement already solves span/vspan even without `fit_vspan`) and switches
 goals on. Caveat: the app's stored clip is ~31 s, so the goal path was syntax-checked
 but NOT exercised through the browser end-to-end.
+
+**6. Non-goal false-positive pass (corrected timing).** First probes used
+`CAP_PROP_POS_MSEC` AFTER a read (which is the NEXT frame's time) and under-reported
+coverage / mis-acquired. With deterministic frame time (`start + idx/fps`), the same
+ordinary stretch (300–350 s) acquires the ball at (2357,759) conf 0.72 and tracks
+**97 % of frames, 0 goal events**. (Earlier 300 s and 1900 s single-acquisition runs
+also gave 0 events.) Caveat: no ground truth that the stretches contain no goal —
+zero events is the expected result, encouraging not proof.
+
+**7. Acquisition reliability + re-acquire.** The probes exposed a real weakness:
+grid acquisition sometimes locked the wrong moving object — a linesman's foot at the
+near touchline (ground z≈34.5 m), then an interior FP at conf 0.46 / 428 px/s. Fixes:
+(a) `pitch_roi_filter` — acquisition candidates must ground-project WELL inside the
+pitch (5 m inside goal lines, 4 m inside touchlines); local tracking is unaffected;
+(b) `acquire(min_conf=0.55)` confidence floor; (c) scan spacing 0.3 → 0.4 s (matches
+the configuration that worked). After the fixes, the goal-sequence probe starting at
+1272.6 s acquires the SAME seed as the good eval (1204,761, conf 0.85) → 92 % coverage
+→ **one left-goal event at 1287.56 s**; the FP stretch stays 97 % / 0 events.
+Pipeline retries acquisition up to 12 times globally (5 s cooldown on failure) so a
+lost ball can be re-acquired; on the goal probe only one attempt was needed.
 
 **=== SESSION 2026-11-26 (cont.) — STEP 4 PROBE: ZOOM FINDS THE FAR BALL ===**
 Product constraint confirmed by the user: **no behind-goal camera** — ball/goal must

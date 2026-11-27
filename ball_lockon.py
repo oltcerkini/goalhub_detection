@@ -24,6 +24,28 @@ from ball_zoom import (detect_patches, merge_candidates, windows_around,
                        windows_over_polygon)
 
 
+def pitch_roi_filter(cal, W, H, margin_x=5.0, margin_z=4.0):
+    """Candidate filter: ground projection must be well INSIDE the pitch.
+
+    Used for acquisition only. It rejects touchline/bench/crowd points that the
+    pixel polygon lets through (a linesman's foot at z≈34 m won acquisition on
+    the goal sequence). Local tracking is unaffected, so the ball near a line is
+    still followed once locked.
+    """
+    from spherical_calib import equirect_to_pitch, DEFAULT_PITCH
+    d = dict(DEFAULT_PITCH); d.update(cal.get("pitch") or {})
+    limx, limz = d["length"] / 2.0 - margin_x, d["width"] / 2.0 - margin_z
+    pose = {"P": np.array(cal["camera_pose"]["position_m"], float),
+            "rvec": np.array(cal["camera_pose"]["rotation_vector"], float)}
+    span, vspan = float(cal.get("span_deg", 180.0)), float(cal.get("vspan_deg", 180.0))
+
+    def ok(x, y):
+        xm, zm = equirect_to_pitch(x, y, pose, W, H, span, vspan)
+        xm, zm = float(np.ravel(xm)[0]), float(np.ravel(zm)[0])
+        return np.isfinite(xm) and np.isfinite(zm) and abs(xm) <= limx and abs(zm) <= limz
+    return ok
+
+
 def pitch_polygon(cal, W, H, n=48):
     """Pitch outline in content pixels, as the ordered projected border loop.
 
@@ -63,10 +85,11 @@ class BallLockOn:
 
     def __init__(self, model, W, H, pitch_poly=None, win=300, up=3.0, imgsz=1024,
                  track_gate=110.0, vel_alpha=0.6, max_missed=36,
-                 scan_conf=0.12, track_conf=0.08):
+                 scan_conf=0.12, track_conf=0.08, candidate_filter=None):
         self.model = model
         self.W, self.H = int(W), int(H)
         self.poly = np.asarray(pitch_poly, np.int32) if pitch_poly is not None else None
+        self.candidate_filter = candidate_filter      # acquisition-only (x,y)->bool
         self.win = int(win)
         self.up = float(up)
         self.imgsz = int(imgsz)
@@ -102,7 +125,10 @@ class BallLockOn:
         cands = merge_candidates(detect_patches(self.model, frame, wins,
                                                 up=self.up, conf=self.scan_conf,
                                                 imgsz=self.imgsz), radius=16.0)
-        return [c for c in cands if self._on_pitch(c)]
+        out = [c for c in cands if self._on_pitch(c)]
+        if self.candidate_filter is not None:
+            out = [c for c in out if self.candidate_filter(c["x"], c["y"])]
+        return out
 
     def local(self, frame, pred):
         wins = windows_around([(pred[0], pred[1])], self.W, self.H, win=self.win)
@@ -140,7 +166,7 @@ class BallLockOn:
         return out
 
     def acquire(self, scan_frames, scan_times, min_speed=8.0, max_speed=500.0,
-                straight_min=0.5):
+                straight_min=0.5, min_conf=0.55):
         """Lock onto the chain with high confidence AND plausible, smooth motion.
 
         A static look-alike is persistent but does not move; an erratic moving
@@ -161,7 +187,7 @@ class BallLockOn:
                 continue
             d = seg / np.maximum(sp[:, None] * np.diff(tt)[:, None], 1e-6)
             straight = float(d.mean(0) @ d.mean(0)) if len(d) else 1.0
-            if straight < straight_min:
+            if straight < straight_min or conf.mean() < min_conf:
                 continue
             score = float(conf.mean()) * (0.6 + 0.4 * straight)
             cands.append({"score": score, "arr": arr, "conf": conf, "tt": tt,
