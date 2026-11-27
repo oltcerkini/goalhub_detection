@@ -37,6 +37,8 @@ from spherical_tiling import (build_grid, tile_equirect, merge_to_equirect,   # 
                               pitch_polygon_from_trace, trace_roi_filter)
 from player_tracker import PlayerTracker                    # noqa: E402
 from ball_trail import BallTrailTracker                     # noqa: E402
+from ball_lockon import BallLockOn, pitch_polygon as calib_pitch_polygon  # noqa: E402
+from goal_detect import detect_goal_entries                 # noqa: E402
 from spherical_projection import equirect_to_perspective    # noqa: E402
 from virtual_camera import compute_camera_pose              # noqa: E402
 
@@ -168,7 +170,8 @@ def _transcode_h264(path, verbose=True):
 def run(video, calibration=None, span=None, fov=60.0, start_s=0.0, max_frames=None,
         step=1, ball=True, roi=True, region=None, render=None, follow=None, trace=None,
         roi_margin_frac=0.20, track_activation=TRACK_ACTIVATION,
-        track_min_hits=TRACK_MIN_HITS, vspan=None, enhance=ENHANCE, verbose=True):
+        track_min_hits=TRACK_MIN_HITS, vspan=None, enhance=ENHANCE, verbose=True,
+        goals=False):
     # region: pin the content crop [x,y,w,h]. The auto-detector can drift a few px
     # between frames; when the calibration trace was drawn on one frame, every
     # frame must be cropped identically or the pose is applied to a shifted space.
@@ -223,6 +226,14 @@ def run(video, calibration=None, span=None, fov=60.0, start_s=0.0, max_frames=No
 
     grid = None
     frames, ball_trail = [], []
+    # goal detection (optional; needs a valid calibration with traced goal frames)
+    lock = None
+    lock_trail = []            # [t, x, y, conf] content-pixel detections
+    goal_pose = None
+    goal_events = []
+    scan_buf, scan_times = [], []
+    acq_attempts = 0
+    scan_pause_until = -1e9
     writer = None
     fwriter = None
     cam_yaw, cam_pitch = 0.0, -30.0      # virtual follow-camera state (deg)
@@ -250,12 +261,50 @@ def run(video, calibration=None, span=None, fov=60.0, start_s=0.0, max_frames=No
                 vspan = _auto_vspan(W, H)
             grid = build_grid(span, fov, vspan)
             metric = make_metric(cal, W, H)
+            if goals and cal_valid and ball_model is not None:
+                try:
+                    gp = calib_pitch_polygon(cal, W, H)
+                except Exception:
+                    gp = None
+                goal_pose = {"P": np.array(cal["camera_pose"]["position_m"], float),
+                             "rvec": np.array(cal["camera_pose"]["rotation_vector"], float)}
+                lock = BallLockOn(ball_model, W, H, pitch_poly=gp)
             # The traced outline sits on the paint, so prefer it over the fitted
             # pose (ill-conditioned on touchline cameras). Grass is the last resort.
             trace_poly = pitch_polygon_from_trace(trace, W, H) if trace else None
             if roi and trace_poly is None and not (metric and metric["valid"]):
                 roi_poly = grass_roi_polygon(proc)
         fidx = int(round(cap.get(cv2.CAP_PROP_POS_FRAMES)))
+
+        # goal ball lock-on (optional): scan to acquire, then dense-follow. Scans
+        # are expensive (~2 s each) so only run a few, and only while searching.
+        if lock is not None:
+            t = fidx / fps
+            lf = proc if proc.shape[:2] == (H, W) else cv2.resize(proc, (W, H))
+            if lock.state == "locked":
+                rec = lock.update(t, lf)
+                if rec is not None and rec[4]:
+                    lock_trail.append([round(t, 3), round(rec[1], 1),
+                                       round(rec[2], 1), round(rec[3], 3)])
+            elif acq_attempts < 3 and t >= scan_pause_until:
+                if not scan_times or t - scan_times[-1] >= 0.3:
+                    scan_buf.append(lf)
+                    scan_times.append(t)
+                if len(scan_buf) >= 5:
+                    seed = lock.acquire(scan_buf, scan_times)
+                    acq_attempts += 1
+                    scan_buf, scan_times = [], []
+                    if seed is not None:
+                        if verbose:
+                            print(f"  [goal] lock-on acquired at {t:.1f}s "
+                                  f"({seed['x']:.0f},{seed['y']:.0f}) n={seed['n']}")
+                        for tt, xx, yy, cc, _ok in lock.trail:
+                            lock_trail.append([round(tt, 3), round(xx, 1),
+                                               round(yy, 1), round(cc, 3)])
+                    else:
+                        scan_pause_until = t + 5.0
+                        if verbose:
+                            print(f"  [goal] acquisition failed at {t:.1f}s; retry later")
 
         # players: tile -> detect -> merge (equirect px)
         dets = []
@@ -429,6 +478,32 @@ def run(video, calibration=None, span=None, fov=60.0, start_s=0.0, max_frames=No
         fwriter.release()
         _transcode_h264(follow, verbose)
 
+    if goals and goal_pose is not None and W is not None:
+        srcs = [("lockon", [(x, y, int(round(t * fps)), c) for t, x, y, c in lock_trail]),
+                ("fullframe", [(x, y, int(f), c) for f, x, y, c in ball_trail])]
+        for side in ("left", "right"):
+            side_ev = []
+            for name, pts in srcs:
+                if not pts:
+                    continue
+                for e in detect_goal_entries(pts, goal_pose, side, W, H,
+                                             span, vspan, fps=fps):
+                    e["source"] = name
+                    side_ev.append(e)
+            side_ev.sort(key=lambda e: e["t_start"])
+            kept = []
+            for e in side_ev:                  # one event per side per ~5 s
+                if kept and abs(e["t_start"] - kept[-1]["t_start"]) < 5.0:
+                    if e["source"] == "lockon" and kept[-1]["source"] != "lockon":
+                        kept[-1] = e
+                    continue
+                kept.append(e)
+            goal_events.extend(kept)
+        if verbose:
+            for e in goal_events:
+                print(f"  [goal] {e['side']} goal at {e['t_start']:.2f}s "
+                      f"({e['source']}, approach {e['approach_px_s']:.0f}px/s)")
+
     out = {
         "version": TRACK_VERSION, "mode": MODE, "video": str(video),
         "image_size": [W, H], "span_deg": span, "vspan_deg": vspan,
@@ -440,6 +515,8 @@ def run(video, calibration=None, span=None, fov=60.0, start_s=0.0, max_frames=No
         "track_activation": track_activation, "track_min_hits": track_min_hits,
         "tracker_strict_iou": False,
         "fps": fps, "frames": frames, "ball_trail": ball_trail,
+        "goals_enabled": bool(goals), "goal_events": goal_events,
+        "ball_lockon_trail": lock_trail,
     }
     if verbose:
         print(f"done: {len(frames)} frames in {time.time()-t0:.0f}s; "
@@ -476,13 +553,16 @@ def main():
     ap.add_argument("--render-follow", default=None,
                     help="write a virtual follow-camera mp4 here")
     ap.add_argument("--out", default="out/track.json")
+    ap.add_argument("--goals", action="store_true",
+                    help="run goal-ball lock-on and emit goal_events (needs a valid "
+                         "calibration whose trace includes the goal frames)")
     a = ap.parse_args()
     res = run(a.video, a.calibration, a.span, start_s=a.start, max_frames=a.frames,
               step=a.step, ball=not a.no_ball, region=a.region, render=a.render,
               follow=a.render_follow,
               trace=a.trace, roi_margin_frac=a.roi_margin_frac,
               track_activation=a.track_activation, track_min_hits=a.track_min_hits,
-              vspan=a.vspan, enhance=a.enhance)
+              vspan=a.vspan, enhance=a.enhance, goals=a.goals)
     Path(a.out).parent.mkdir(parents=True, exist_ok=True)
     Path(a.out).write_text(json.dumps(res, indent=1))
     print(f"wrote {a.out}")

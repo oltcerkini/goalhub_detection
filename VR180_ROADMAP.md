@@ -258,6 +258,17 @@ Debug/prototypes: `out/_lockon_eval.py`, `out/_goal_rule_eval.py`,
 `test_goal_detect.py` (new) + the four existing suites ALL PASS.
 NOTE: `app180.py` still needs a restart after recalibration to use the anchored fit.
 
+**4. Pipeline integration (optional `--goals`).** `vr180_pipeline.run(goals=True)`
+builds a `BallLockOn` on the content frames once W/H are known: while searching it
+buffers 5 frames ≥0.3 s apart and calls `acquire` (max 3 attempts, 5 s cooldown on
+failure); while locked it follows per frame. After the pass it runs
+`detect_goal_entries` on both the lock-on trail and the full-frame `ball_trail`,
+dedupes one event per side per 5 s (prefers lock-on), and adds
+`goal_events` + `ball_lockon_trail` to the output. Off by default. Smoke run
+(170 frames from 1282 s): acquired the ball at 1283.4 s and emitted one left-goal
+event at 1287.71 s (approach 312 px/s). Note: 4K player tiling dominates runtime
+(~1.5 s/frame); the acquisition scan adds ~10 s once.
+
 **=== SESSION 2026-11-26 (cont.) — STEP 4 PROBE: ZOOM FINDS THE FAR BALL ===**
 Product constraint confirmed by the user: **no behind-goal camera** — ball/goal must
 work from the normal wide view ([[product-camera-setup]]). New module `ball_zoom.py`.

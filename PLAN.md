@@ -45,10 +45,18 @@ right here because the ball approached fast and the goal area was entered — bu
 ball's identity *inside the net* is not verified. That is the next thing to harden
 (re-acquire + motion-into-goal evidence), not a calibration problem.
 
+- **Wired into the pipeline** as an optional stage: `vr180_pipeline.py --goals`
+  emits `goal_events` (plus the lock-on trail). Verified end-to-end on the clip:
+  acquired the ball itself at 1283.4 s and reported **one left-goal event at
+  1287.7 s** (approach 312 px/s). Off by default, so existing behaviour is unchanged.
+
 **Next, in order:**
-1. **Integrate** lock-on + goal rule into the pipeline (near-goal ROI, re-acquire
-   after loss) and run it on the other clips for false-positive checks.
-2. (optional) Validate the entry rule against a couple of non-goal sequences.
+1. **False-positive pass**: run `--goals` on the other clips / non-goal stretches
+   and make sure nothing spurious fires (needs a valid calibration with goal frames
+   for at least one more clip).
+2. **Re-acquire after loss** in the dense loop (currently the tracker can sit on a
+   static object near the goal once the real ball is occluded), and surface goal
+   events in the app UI.
 3. Then step 5 (stats) — goals are the last detection piece.
 
 ✅ **Step 1 done** — virtual follow-camera + MP4 built and verified (clean perspective
