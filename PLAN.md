@@ -17,22 +17,39 @@ Upload a 180° match video → the app finds **players + ball** → positions/di
 
 ## Current step
 
-**RESUME HERE (say "continue"):** saved 2026-11-26 (end of session). **Steps 1 ✅,
-2 ✅, 3 ✅ done. Step 4 in progress.** The zoom idea is proven: the far ball is found
-in **9/9** hand-marked frames when the program zooms in (it was 0/9 before), and
-following it at full frame rate stays on target at **5/6** checkpoints. Nothing is
-blocked on you.
+**RESUME HERE (say "continue"):** saved 2026-11-27. **Steps 1 ✅, 2 ✅, 3 ✅ done.
+Step 4 prototyped end-to-end.** The far ball is found in 9/9 hand-marked frames when
+the program zooms; **lock-on now acquires the right moving spot on its own** and
+follows it at 0–2 px on 5 of the 6 goal-sequence checkpoints (same as when seeded by
+hand). The **goal rule fires once** at the correct goal in your Barca clip. Nothing
+is blocked on you.
+
+**What I built this session (all measured):**
+- **Calibration now anchors the painted goal frames.** Your trace already contained
+  136 goal-frame points (posts + crossbar) that were being thrown away; they are now
+  used, and the far-goal fit error dropped from **17–40 px to ~3–5 px**. That is the
+  accuracy the goal rule needed. (Camera height also became plausible, ~4 m.)
+- **Lock-on** (`ball_lockon.py`): a scan finds ~20–60 ball-like spots; it now picks
+  the ball by requiring confidence **and** smooth, plausible motion. Static lookalikes
+  (posts, keeper, scoreboards) and erratic spots are rejected.
+- **Goal entry rule** (`calib/goal_detect.py`): one event when the ball approaches the
+  mouth quickly and enters it; survives frame-to-frame flicker. On your clip it
+  reports exactly **one goal at the correct (right-in-image) goal at ~1287.7 s** and
+  none at the other goal. A synthetic "keeper standing in the goal" case correctly
+  does **not** fire.
+
+**Honest caveat:** the ball is briefly occluded by players/keeper exactly as it
+crosses, so at the goal instant the tracker latches onto a high-confidence object
+near the goal (the trail is ~65 px off the hand label at 1287). The event is still
+right here because the ball approached fast and the goal area was entered — but the
+ball's identity *inside the net* is not verified. That is the next thing to harden
+(re-acquire + motion-into-goal evidence), not a calibration problem.
 
 **Next, in order:**
-1. *(optional, ~5 min)* free zoom-size test — try different zoom amounts on your 18
-   marked frames, keep whichever is most reliable. No downloads.
-2. **Lock-on**: pick the right moving spot among the white lookalikes and follow it.
-3. **Goal rule**: when the followed ball crosses the goal line (in metres), report a goal.
-   Step 5 (stats) comes after.
-
-*Note:* an AI upscaler / super-resolution repo was considered and **not adopted** —
-zoom cannot add real pixels, and our bottleneck is picking the right spot, not
-resolution. Revisit only if a zoom-size test shows the ball is barely visible.
+1. **Integrate** lock-on + goal rule into the pipeline (near-goal ROI, re-acquire
+   after loss) and run it on the other clips for false-positive checks.
+2. (optional) Validate the entry rule against a couple of non-goal sequences.
+3. Then step 5 (stats) — goals are the last detection piece.
 
 ✅ **Step 1 done** — virtual follow-camera + MP4 built and verified (clean perspective
 view that pans to the action; new video in the app).
@@ -71,7 +88,7 @@ pitch on your frame — if they sit on the painted lines, it's good. No action f
 | 1 | **Virtual follow-camera + MP4** — smooth camera that follows the action; render a clean MP4 | me | ✅ **Done** |
 | 2 | **Run the pipeline on all your clips** (night, stereo, portrait, wide) and fix the cheap failures | me | ✅ **Done** |
 | 3 | **Make calibration easier + more accurate** | me + your camera specs | ✅ **Done** — your specs are optional now; the spans are solved from the pitch |
-| 4 | **Ball near goals / goal detection** — must work from the normal match camera (not behind-goal) | me | **in progress** — zoomed search finds the far ball in 6/6 labeled goal frames (was 0/9); next: auto lock-on + goal crossing |
+| 4 | **Ball near goals / goal detection** — must work from the normal match camera (not behind-goal) | me | **in progress** — auto lock-on + goal entry rule prototyped: 5/6 checkpoints at 0–2 px, one correct goal event; next: integrate + false-positive pass |
 | 5 | **Events & analytics** (possession, shots, goals, heatmaps) from metre positions | me | after 3/4 |
 
 ## The few things I actually need from you (only when listed)

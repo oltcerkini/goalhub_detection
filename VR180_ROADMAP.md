@@ -194,6 +194,70 @@ Barca trace does not calibrate yet** — the fitted pose is degenerate.
   scale-aware ball retrain (needs more labels than 18) or a closer camera.**
   Tiling/zoom/high-res exhausted. Note: the far camera is not the product setup.
 
+**=== SESSION 2026-11-27 — STEP 4: GOAL ANCHOR, LOCK-ON, GOAL ENTRY ===**
+Working under the product constraint (normal wide camera, [[product-camera-setup]]).
+
+**1. Calibration anchors the painted goal frames (biggest accuracy win).**
+The user trace `calib/calib_equirect.json` contains `goal_left`/`goal_right`
+(posts+crossbar, 68 pts each = 136 pts) that `calibration_from_traces` used to
+drop because they are 3D, not ground lines. Added `goal_frame_specs`,
+`_goal_frame_curve`/`_project_curve3d`, and a `frame_w`-weighted residual in
+`fit_pixel`; `GOAL_FLIP` now swaps the frame labels with the goal-line parity.
+Measured on the Barca clip (default `goal_frame_weight=1.5`):
+
+| feature | before (no anchor) | after |
+|---|---|---|
+| traced goal frames (px, median) | 17.4 / 40.0 | **2.8 / 4.6** |
+| near touchline (px) | 4.8 | 8.0 |
+| overall median (px) | 4.96 | **5.11** (valid) |
+| camera height | 5.8 m | ~3.9 m (plausible) |
+
+Weight sweep (0.35→3.0) trades near-touchline (~5→10 px) against goal frames
+(20→3 px); 1.5 is the chosen balance. **Leave-one-goal-out:** anchoring only one
+goal predicts the other at 14–19 px — the far field stays ill-conditioned, so
+trust the calibration AT THE TRACED GOALS, not at untraced far locations. The
+quality stats now use UNSCALED pixel residuals (the optimizer still uses the
+weighted ones).
+
+**2. `goal_detect.py` vspan fix + pixel mouth + entry rule.**
+`detect_goals`/`ray_plane_point`/`goal_frame_equirect` ignored vspan (default 180);
+now threaded through (v2 clips have vspan≈50). Added `goal_mouth_polygon`,
+`in_goal_mouth_px`, `detect_goals_px`, and `detect_goal_entries`. Lateral width
+stays from the GROUND position (ray-plane lateral is only valid ON the plane; using
+it broke the wide-shot case). `detect_goal_entries` groups inside-mouth points
+allowing ~0.7 s gaps (the ball pins to goal-line pixels and flickers), requires a
+fast approach from OUTSIDE the mouth, and reports one event per entry. Rationale for
+the approach gate: a keeper standing in the mouth has no approach.
+
+**3. Lock-on acquisition + dense tracking (`ball_lockon.py`).**
+Grid scan over the whole content (tiling restricted to the pitch polygon DROPS the
+boundary windows and with them the ball at the goal line — the polygon is applied to
+candidates instead, ±60 px). Acquisition builds greedy velocity chains over 5 scans
+(~0.42 s apart) and scores `mean_conf·(0.6+0.4·straightness)` among chains with
+speed 8–500 px/s. This rejects static FPs (posts/keeper/scoreboards) and erratic
+ones. `pitch_polygon` returns the ordered projected border loop (off-frame goal
+corners kept) instead of a convex hull. Dense follow = one 300 px local window per
+frame.
+
+Measured on the 18-label Barca sequence (t=1273–1308), **no GT seeding**:
+- Acquisition locks the ball; trail hits **f0–f5** (t=1273–1283) at **0–2 px =
+  5/6 goal-sequence labels**, equal to the hand-seeded baseline.
+- f7 (1287) misses by 64 px: the ball is occluded by players/keeper exactly at the
+  goal. The tracker then latches a static high-conf object near the goal for the
+  rest of the clip (no re-acquire wired into the dense loop). Labels 1297–1307
+  (later play) miss.
+- Goal entry rule on this trail: **exactly one event, left (image-right) goal,
+  t≈1287.7 s, approach 364 px/s, z=-0.15 m; zero on the right goal.** This matches
+  the labelled goal. Caveat: event identity at the net is not verified because of
+  the occlusion — corroborated by approach + mouth occupancy, not by tracking the
+  ball into the net. This partly revisits the "tiling/zoom exhausted" note above:
+  general tiling fails, but motion-ranked acquisition + dense local tracking works.
+
+Debug/prototypes: `out/_lockon_eval.py`, `out/_goal_rule_eval.py`,
+`out/_acq_scans.json`, `out/_lockon_trail.json` (git-ignored). Tests:
+`test_goal_detect.py` (new) + the four existing suites ALL PASS.
+NOTE: `app180.py` still needs a restart after recalibration to use the anchored fit.
+
 **=== SESSION 2026-11-26 (cont.) — STEP 4 PROBE: ZOOM FINDS THE FAR BALL ===**
 Product constraint confirmed by the user: **no behind-goal camera** — ball/goal must
 work from the normal wide view ([[product-camera-setup]]). New module `ball_zoom.py`.

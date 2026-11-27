@@ -339,12 +339,45 @@ def _project_curve(pts_m, pose, W, H, span, vspan):
     return np.stack([ex[ok], ey[ok]], 1)
 
 
-def fit_pixel(traces, W, H, geom, pose0, span0, vspan0, max_nfev=120, f_scale=2.0):
+def _project_curve3d(pts3, pose, W, H, span, vspan):
+    """(N,3) pitch metres -> equirect pixels (same convention as pitch_to_equirect)."""
+    P = np.asarray(pose["P"], float)
+    R = rotmat(pose["rvec"])
+    d_p = np.asarray(pts3, float) - P[None, :]
+    d_p = d_p / np.linalg.norm(d_p, axis=-1, keepdims=True)
+    d_e = d_p @ R
+    yaw = np.degrees(np.arctan2(d_e[..., 0], d_e[..., 2]))
+    pit = np.degrees(np.arcsin(np.clip(d_e[..., 1], -1, 1)))
+    ex, ey = (yaw / span + 0.5) * W, (0.5 - pit / vspan) * H
+    ok = np.isfinite(ex) & np.isfinite(ey)
+    return np.stack([np.ravel(ex)[ok], np.ravel(ey)[ok]], 1)
+
+
+def _goal_frame_curve(spec, n=50):
+    """Dense 3D samples of a goal frame (two posts + crossbar + ground base)."""
+    x = float(spec[1])
+    hw, h = GOAL_HALF_WIDTH, GOAL_HEIGHT
+    corners = [(x, 0.0, -hw), (x, h, -hw), (x, h, hw), (x, 0.0, hw)]
+    out = []
+    for i in range(4):
+        a, b = np.asarray(corners[i]), np.asarray(corners[(i + 1) % 4])
+        out.append(a + np.linspace(0, 1, n)[:, None] * (b - a))
+    return np.vstack(out)
+
+
+def fit_pixel(traces, W, H, geom, pose0, span0, vspan0, max_nfev=120, f_scale=2.0,
+              frame_traces=None, frame_specs=None, frame_w=1.5):
     """Refine (P, rvec, span, vspan) minimising traced-pixel -> model px distance.
 
     traces: [(x_px, y_px, label)] already parity-mapped. points are compared to
     the DENSELY projected model curve of their own label, so no ground-plane
     inversion is needed (rays above the horizon are handled naturally).
+
+    frame_traces / frame_specs: optional goal-frame traces (posts+crossbar, 3D)
+    and their specs. Far-goal pixels have huge metric leverage, so anchoring the
+    painted goal frames is what fixes the metre accuracy at the goal line. Their
+    residuals are scaled by `frame_w` so the robust loss keeps them in play
+    instead of down-weighting them like a far-field outlier.
     """
     groups = {}
     for x, y, lab in traces:
@@ -352,15 +385,27 @@ def fit_pixel(traces, W, H, geom, pose0, span0, vspan0, max_nfev=120, f_scale=2.
     groups = {k: np.asarray(v, float) for k, v in groups.items()}
     curves = {lab: _dense_curve(geom[lab]) for lab in groups}
 
-    def per_point(p):
+    fgroups = {}
+    for x, y, lab in (frame_traces or []):
+        fgroups.setdefault(lab, []).append((x, y))
+    fgroups = {k: np.asarray(v, float) for k, v in fgroups.items()}
+    fcurves = {lab: _goal_frame_curve(frame_specs[lab]) for lab in fgroups}
+
+    def per_point(p, scale_frames=True):
         pose = {"P": p[:3], "rvec": p[3:6]}
         span, vs = float(p[6]), float(p[7])
+        fw = frame_w if scale_frames else 1.0
         out = []
         for lab, pts in groups.items():
             c = _project_curve(curves[lab], pose, W, H, span, vs)
             if len(c) == 0:
                 out.append(np.full(len(pts), 500.0)); continue
             out.append(cKDTree(c).query(pts)[0])
+        for lab, pts in fgroups.items():
+            c = _project_curve3d(fcurves[lab], pose, W, H, span, vs)
+            if len(c) == 0:
+                out.append(np.full(len(pts), 500.0 * fw)); continue
+            out.append(fw * cKDTree(c).query(pts)[0])
         return np.concatenate(out)
 
     lo = np.array([-200, 0.5, -200, -np.pi, -np.pi, -np.pi, 120.0, 20.0])
@@ -383,15 +428,21 @@ def fit_pixel(traces, W, H, geom, pose0, span0, vspan0, max_nfev=120, f_scale=2.
             best = (trim, r.x.copy(), d)
     if best is None:
         raise RuntimeError("pixel refinement failed")
-    trim, p, d = best
+    trim, p, _d_scaled = best
     pose = {"P": p[:3], "rvec": p[3:6], "R": rotmat(p[3:6]).tolist()}
     span, vs = float(p[6]), float(p[7])
+    d = per_point(p, scale_frames=False)        # honest, unscaled pixel residuals
     per, idx = {}, 0
     for lab, pts in groups.items():
         dd = d[idx:idx + len(pts)]; idx += len(pts)
         per[lab] = (len(dd), float(np.median(dd)), float(np.sqrt(np.mean(dd ** 2))))
+    for lab, pts in fgroups.items():
+        dd = d[idx:idx + len(pts)]; idx += len(pts)
+        per[lab] = (len(dd), float(np.median(dd)), float(np.sqrt(np.mean(dd ** 2))))
     med = float(np.median(d))
     rms = float(np.sqrt(np.mean(d ** 2)))
+    dsort = np.sort(d)
+    trim = float(np.mean(dsort[:max(1, int(0.9 * len(d)))]))
     return {"pose": pose, "span": span, "vspan": vs, "med_px": med,
             "trim90_px": trim, "rms_px": rms, "per": per,
             "n": int(len(d))}
@@ -408,7 +459,20 @@ RMS_VALID_M = 1.0          # metric RMS below this -> calibration_valid
 # between the two conventions is invisible in the metres residual: the solver
 # happily fits the mirrored pose and the pitch renders off-frame. Flipping the
 # two goal labels is the one-pair swap that resolves the handedness.
-GOAL_FLIP = {"goal_line_left": "goal_line_right", "goal_line_right": "goal_line_left"}
+GOAL_FLIP = {"goal_line_left": "goal_line_right", "goal_line_right": "goal_line_left",
+             "goal_left": "goal_right", "goal_right": "goal_left"}
+
+# Traced goal frames (posts + crossbar) are 3D features, not ground lines. They
+# are excluded from the ground-plane metric solve and used ONLY by fit_pixel,
+# where anchoring the painted goal mouth fixes the metre accuracy at the goal.
+FRAME_LABELS = ("goal_left", "goal_right")
+
+
+def goal_frame_specs(dims=None):
+    """label -> ("frame", x_line) for the traced goal frames (image-side naming)."""
+    d = dict(DEFAULT_PITCH); d.update(dims or {})
+    hl = d["length"] / 2.0
+    return {"goal_left": ("frame", -hl), "goal_right": ("frame", hl)}
 
 
 def _corners_in_frame(pose, W, H, span, vspan, dims=None):
@@ -440,18 +504,20 @@ def calibration_from_traces(src, span=None, verbose=True):
     geom = pitch_geometry(dims)
 
     traces = []
+    ftraces = []
+    frames = goal_frame_specs(dims)
     used = {}
     dropped = 0
     for ln in data.get("lines", []):
         lab = ln.get("label")
-        if lab not in geom:
+        if lab not in geom and lab not in frames:
             continue
         for pt in ln.get("points", []):
             x, y = float(pt[0]), float(pt[1])
             if not (0 <= x < W and 0 <= y < H):     # off-frame pixel = not a valid sample
                 dropped += 1
                 continue
-            traces.append((x, y, lab))
+            (ftraces if lab in frames else traces).append((x, y, lab))
             used[lab] = used.get(lab, 0) + 1
     if verbose and dropped:
         print(f"  dropped {dropped} point(s) outside the {int(W)}x{int(H)} frame")
@@ -463,6 +529,7 @@ def calibration_from_traces(src, span=None, verbose=True):
     # corrupting metres. Default: assume 180 and let a wrong assumption fail loudly.
     fit_vs = bool(data.get("fit_vspan", False))
     vspan0 = float(data.get("vspan_deg", 180.0))
+    frame_w = float(data.get("goal_frame_weight", 1.5))
 
     # robust loss: a mistraced near-horizon line (~1 px = metres) can be 100x off
     # and would otherwise swamp the least-squares fit.
@@ -491,6 +558,7 @@ def calibration_from_traces(src, span=None, verbose=True):
     if _parity_flip:
         # keep every downstream residual consistent with the chosen convention
         traces = [(x, y, GOAL_FLIP.get(l, l)) for x, y, l in traces]
+        ftraces = [(x, y, GOAL_FLIP.get(l, l)) for x, y, l in ftraces]
         if verbose:
             print("  goal_line_left/right flipped to match the model's camera frame")
 
@@ -502,13 +570,14 @@ def calibration_from_traces(src, span=None, verbose=True):
     px = None
     for _ in range(3):
         try:
-            px = fit_pixel(traces, W, H, geom, pose, span, vspan_used)
+            px = fit_pixel(traces, W, H, geom, pose, span, vspan_used,
+                           frame_traces=ftraces, frame_specs=frames, frame_w=frame_w)
         except Exception as e:                              # noqa: BLE001
             if verbose:
                 print(f"  pixel refinement unavailable ({e}); using metric fit")
             px = None
             break
-        meds_px = {l: v[1] for l, v in px["per"].items()}
+        meds_px = {l: v[1] for l, v in px["per"].items() if l not in frames}
         if len(meds_px) <= 3:
             break
         overall_px = float(np.median(list(meds_px.values())))

@@ -10,13 +10,18 @@ A goal = the ball transitions from OUTSIDE the mouth to INSIDE it and stays in
 for >= `consecutive` sampled frames.
 """
 
+import cv2
 import numpy as np
 
-from spherical_calib import (GOAL_HALF_WIDTH, GOAL_HEIGHT, PITCH_LEN,
-                             equirect_dir, equirect_to_pitch, rotmat)
+try:                                        # imported as calib.goal_detect
+    from .spherical_calib import (GOAL_HALF_WIDTH, GOAL_HEIGHT, PITCH_LEN,
+                                  equirect_dir, equirect_to_pitch, rotmat)
+except ImportError:                         # run as a script / calib on sys.path
+    from spherical_calib import (GOAL_HALF_WIDTH, GOAL_HEIGHT, PITCH_LEN,
+                                 equirect_dir, equirect_to_pitch, rotmat)
 
 
-def pitch3d_to_equirect(pts, pose, W, H, span=180.0):
+def pitch3d_to_equirect(pts, pose, W, H, span=180.0, vspan=180.0):
     """3D pitch points (N,3) metres -> equirect pixels (x_eq, y_eq)."""
     P = np.asarray(pose["P"], float)
     R = rotmat(pose["rvec"])
@@ -26,7 +31,7 @@ def pitch3d_to_equirect(pts, pose, W, H, span=180.0):
     d_e = d_p @ R
     yaw = np.degrees(np.arctan2(d_e[..., 0], d_e[..., 2]))
     pit = np.degrees(np.arcsin(np.clip(d_e[..., 1], -1, 1)))
-    return (yaw / span + 0.5) * W, (0.5 - pit / 180.0) * H
+    return (yaw / span + 0.5) * W, (0.5 - pit / vspan) * H
 
 
 def goal_line_x(side, length=PITCH_LEN):
@@ -40,30 +45,30 @@ def goal_frame_3d(side, length=PITCH_LEN):
     return np.array([[x, 0, -hw], [x, 0, hw], [x, h, -hw], [x, h, hw]], float)
 
 
-def goal_frame_equirect(pose, side, W, H, span=180.0):
+def goal_frame_equirect(pose, side, W, H, span=180.0, vspan=180.0):
     """Project the goal frame into equirect pixels: bases, tops, crossbar."""
     base_l, base_r, top_l, top_r = goal_frame_3d(side)
-    b_l = pitch3d_to_equirect(base_l, pose, W, H, span)
-    b_r = pitch3d_to_equirect(base_r, pose, W, H, span)
-    t_l = pitch3d_to_equirect(top_l, pose, W, H, span)
-    t_r = pitch3d_to_equirect(top_r, pose, W, H, span)
+    b_l = pitch3d_to_equirect(base_l, pose, W, H, span, vspan)
+    b_r = pitch3d_to_equirect(base_r, pose, W, H, span, vspan)
+    t_l = pitch3d_to_equirect(top_l, pose, W, H, span, vspan)
+    t_r = pitch3d_to_equirect(top_r, pose, W, H, span, vspan)
     cross = []
     for f in np.linspace(0, 1, 24):
         p = (1 - f) * np.array([goal_line_x(side), GOAL_HEIGHT, -GOAL_HALF_WIDTH]) \
             + f * np.array([goal_line_x(side), GOAL_HEIGHT, GOAL_HALF_WIDTH])
-        cross.append(pitch3d_to_equirect(p, pose, W, H, span))
+        cross.append(pitch3d_to_equirect(p, pose, W, H, span, vspan))
     return {"base_left": b_l, "base_right": b_r, "top_left": t_l, "top_right": t_r,
             "crossbar": np.array(cross)}
 
 
-def ray_plane_point(x_eq, y_eq, pose, plane_x, W, H, span=180.0):
+def ray_plane_point(x_eq, y_eq, pose, plane_x, W, H, span=180.0, vspan=180.0):
     """Intersect the pixel's ray with the vertical plane x = plane_x.
 
     Returns (y_m, z_m) on the plane, or (nan, nan) if the ray is parallel or
     the plane is behind the camera."""
     P = np.asarray(pose["P"], float)
     R = rotmat(pose["rvec"])
-    d = equirect_dir(x_eq, y_eq, W, H, span) @ R.T
+    d = equirect_dir(x_eq, y_eq, W, H, span, vspan) @ R.T
     dx = d[..., 0]
     ok = np.abs(dx) > 1e-9
     t = np.where(ok, (plane_x - P[0]) / np.where(ok, dx, 1.0), np.nan)
@@ -77,7 +82,7 @@ def in_mouth(y, z, hw=GOAL_HALF_WIDTH, h=GOAL_HEIGHT):
     return (np.abs(z) <= hw) & (y >= 0.0) & (y <= h)
 
 
-def detect_goals(trail, pose, side, W, H, span=180.0, consecutive=3):
+def detect_goals(trail, pose, side, W, H, span=180.0, vspan=180.0, consecutive=3):
     """trail: list of (x_eq, y_eq, frame_idx, conf) in equirect pixels (any order).
 
     Returns a list of events: dicts with the run's start/end frame, peak conf,
@@ -88,12 +93,14 @@ def detect_goals(trail, pose, side, W, H, span=180.0, consecutive=3):
     states = []
     for x, y_, f, c in seq:
         # crossing + width from the GROUND position (valid for a grounded ball)
-        xm, zm = equirect_to_pitch(x, y_, pose, W, H, span)
+        xm, zm = equirect_to_pitch(x, y_, pose, W, H, span, vspan)
         xm, zm = float(np.ravel(xm)[0]), float(np.ravel(zm)[0])
         near = np.isfinite(xm) and abs(xm - px) <= 3.0
+        # lateral width from the GROUND position (correct for a grounded ball on
+        # either side of the line); ray-plane lateral is only valid ON the plane.
         wide = (not np.isfinite(zm)) or abs(zm) > GOAL_HALF_WIDTH
-        # height from the ray's intersection with the goal plane (valid at the plane)
-        yapp, zapp = ray_plane_point(x, y_, pose, px, W, H, span)
+        # height from the ray's intersection with the goal plane
+        yapp, zapp = ray_plane_point(x, y_, pose, px, W, H, span, vspan)
         yapp = float(np.ravel(yapp)[0])
         high = (not np.isfinite(yapp)) or not (0.0 <= yapp <= GOAL_HEIGHT)
         inside = near and not wide and not high
@@ -112,6 +119,115 @@ def detect_goals(trail, pose, side, W, H, span=180.0, consecutive=3):
     return events
 
 
+def goal_mouth_polygon(pose, side, W, H, span=180.0, vspan=180.0):
+    """Projected goal mouth (posts + crossbar) as a 4-gon in pixel space."""
+    gf = goal_frame_equirect(pose, side, W, H, span, vspan)
+    return np.array([np.ravel(gf["base_left"]), np.ravel(gf["base_right"]),
+                     np.ravel(gf["top_right"]), np.ravel(gf["top_left"])], float)
+
+
+def in_goal_mouth_px(x, y, poly, inset_frac=0.10):
+    """Is (x, y) inside the goal mouth, shrunk 10% toward its centre?"""
+    c = poly.mean(0)
+    p = (c + (poly - c) * (1.0 - inset_frac)).astype(np.float32)
+    return cv2.pointPolygonTest(p, (float(x), float(y)), False) >= 0
+
+
+def detect_goals_px(trail, pose, side, W, H, span=180.0, vspan=180.0,
+                    consecutive=6, depth_gate_m=15.0, inset_frac=0.10):
+    """Pixel-space goal rule: the ball enters the projected mouth and stays.
+
+    Lateral position and height come from the goal-mouth POLYGON (robust at the
+    far goal, where ground-metre projections graze the pitch). A loose depth gate
+    stops a far ball that merely lines up with the mouth. trail: detected points
+    only, as (x_eq, y_eq, frame_idx, conf).
+    """
+    poly = goal_mouth_polygon(pose, side, W, H, span, vspan)
+    px = goal_line_x(side)
+    seq = sorted(trail, key=lambda z: z[2])
+    states = []
+    for x, y, f, c in seq:
+        xm, zm = equirect_to_pitch(x, y, pose, W, H, span, vspan)
+        xm = float(np.ravel(xm)[0])
+        near = np.isfinite(xm) and abs(xm - px) <= depth_gate_m
+        inside = near and in_goal_mouth_px(x, y, poly, inset_frac)
+        yapp, zapp = ray_plane_point(x, y, pose, px, W, H, span, vspan)
+        states.append((f, bool(inside), float(np.ravel(yapp)[0]),
+                       float(np.ravel(zapp)[0]), float(c), x, y))
+    events, run = [], []
+    for st in states:
+        if st[1]:
+            run.append(st)
+        elif run:
+            if len(run) >= consecutive:
+                events.append(_event(run))
+            run = []
+    if len(run) >= consecutive:
+        events.append(_event(run))
+    return events
+
+
+def detect_goal_entries(trail, pose, side, W, H, span=180.0, vspan=180.0, fps=24.0,
+                        gap_s=0.7, min_dur_s=0.2, min_inside_frac=0.5,
+                        depth_gate_m=15.0, inset_frac=0.10, approach_s=1.5,
+                        min_approach_px_s=25.0):
+    """Gap-tolerant goal-ENTRY rule (one event per ball entering the mouth).
+
+    At the far goal the ball is pinned to the goal-line pixels, so inside/outside
+    flickers frame to frame; strict consecutive-frame runs split up. Instead,
+    group inside points into episodes allowing gaps of `gap_s`, keep episodes
+    that persist and are mostly inside, and require the ball to have APPROACHED
+    from outside the mouth at speed (this is what rules out a keeper who is
+    simply standing in the goal). The event is reported at the episode start.
+    trail: detected points only, as (x_eq, y_eq, frame_idx, conf).
+    """
+    poly = goal_mouth_polygon(pose, side, W, H, span, vspan)
+    px = goal_line_x(side)
+    pts = []
+    for x, y, f, c in sorted(trail, key=lambda z: z[2]):
+        xm, _ = equirect_to_pitch(x, y, pose, W, H, span, vspan)
+        xm = float(np.ravel(xm)[0])
+        near = np.isfinite(xm) and abs(xm - px) <= depth_gate_m
+        inside = bool(near and in_goal_mouth_px(x, y, poly, inset_frac))
+        pts.append((f / fps, inside, float(c), float(x), float(y)))
+    episodes, cur = [], []
+    for p in pts:
+        if not p[1]:
+            continue
+        if cur and p[0] - cur[-1][0] > gap_s:
+            episodes.append(cur)
+            cur = []
+        cur.append(p)
+    if cur:
+        episodes.append(cur)
+
+    events = []
+    for ep in episodes:
+        t0, t1 = ep[0][0], ep[-1][0]
+        if t1 - t0 < min_dur_s:
+            continue
+        span_pts = [p for p in pts if t0 <= p[0] <= t1]
+        frac = sum(p[1] for p in span_pts) / max(1, len(span_pts))
+        if frac < min_inside_frac:
+            continue
+        pre = [p for p in pts if t0 - approach_s <= p[0] < t0]
+        sp = [np.hypot(b[3] - a[3], b[4] - a[4]) / (b[0] - a[0])
+              for a, b in zip(pre, pre[1:]) if b[0] - a[0] > 1e-3]
+        approach = max(sp) if sp else 0.0
+        if approach < min_approach_px_s or not any(not p[1] for p in pre):
+            continue
+        yapp, zapp = ray_plane_point(
+            float(np.mean([p[3] for p in ep])), float(np.mean([p[4] for p in ep])),
+            pose, px, W, H, span, vspan)
+        events.append({"side": side, "t_start": t0, "t_end": t1,
+                       "n_frames": len(ep), "inside_frac": frac,
+                       "approach_px_s": approach, "max_conf": max(p[2] for p in ep),
+                       "mean_y_m": float(np.ravel(yapp)[0]),
+                       "mean_z_m": float(np.ravel(zapp)[0]),
+                       "ball_eq": (ep[0][3], ep[0][4])})
+    return events
+
+
 def _event(run):
     ys = np.array([r[2] for r in run]); zs = np.array([r[3] for r in run])
     cf = np.array([r[4] for r in run])
@@ -122,9 +238,9 @@ def _event(run):
 
 
 # ---- synthetic self-test -------------------------------------------------- #
-def _trail_from_3d(pts, pose, W, H, span, frames, noise=0.0, seed=0):
+def _trail_from_3d(pts, pose, W, H, span, frames, noise=0.0, seed=0, vspan=180.0):
     rng = np.random.default_rng(seed)
-    xs, ys = pitch3d_to_equirect(np.asarray(pts, float), pose, W, H, span)
+    xs, ys = pitch3d_to_equirect(np.asarray(pts, float), pose, W, H, span, vspan)
     out = []
     for x, y, f in zip(np.ravel(xs), np.ravel(ys), frames):
         if np.isfinite(x) and 0 <= x < W and 0 <= y < H:
@@ -134,7 +250,6 @@ def _trail_from_3d(pts, pose, W, H, span, frames, noise=0.0, seed=0):
 
 
 def synthetic_test(W=3401, H=1586, span=180.0, verbose=True):
-    from spherical_calib import rotmat as rm
     P = np.array([26.0, 9.5, -58.0])
     pose = {"P": P, "rvec": np.radians([18.0, 62.0, 7.0])}
     side = "right"
