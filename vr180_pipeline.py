@@ -261,7 +261,8 @@ def run(video, calibration=None, span=None, fov=60.0, start_s=0.0, max_frames=No
                 vspan = _auto_vspan(W, H)
             grid = build_grid(span, fov, vspan)
             metric = make_metric(cal, W, H)
-            if goals and cal_valid and ball_model is not None:
+            if (goals and cal_valid and ball_model is not None
+                    and int(cal.get("version", 1)) >= 2):
                 try:
                     gp = calib_pitch_polygon(cal, W, H)
                 except Exception:
