@@ -235,6 +235,7 @@ def run(video, calibration=None, span=None, fov=60.0, start_s=0.0, max_frames=No
     scan_buf, scan_times = [], []
     acq_attempts = 0
     scan_pause_until = -1e9
+    lock_draw = None           # current lock-on ball (content px) for the render
     writer = None
     fwriter = None
     cam_yaw, cam_pitch = 0.0, -30.0      # virtual follow-camera state (deg)
@@ -289,6 +290,9 @@ def run(video, calibration=None, span=None, fov=60.0, start_s=0.0, max_frames=No
                 if rec is not None and rec[4]:
                     lock_trail.append([round(t, 3), round(rec[1], 1),
                                        round(rec[2], 1), round(rec[3], 3)])
+                    lock_draw = (rec[1], rec[2])
+                else:
+                    lock_draw = None
             elif acq_attempts < 12 and t >= scan_pause_until:
                 # retry after loss as well as at the start; each acquisition is
                 # ~10 s of scanning, so keep a global cap on attempts.
@@ -427,6 +431,10 @@ def run(video, calibration=None, span=None, fov=60.0, start_s=0.0, max_frames=No
         if render is not None or follow is not None:
             # annotated content (drawn on the equirect, then optionally reprojected)
             vis = proc.copy()
+            # The auto content region drifts a few px per frame; the writer is a
+            # fixed size, and cv2 silently drops frames whose size differs.
+            if vis.shape[1] != W or vis.shape[0] != H:
+                vis = cv2.resize(vis, (W, H), interpolation=cv2.INTER_AREA)
             for p in tracks:
                 x1, y1, x2, y2 = [int(v) for v in p["bbox"]]
                 cv2.rectangle(vis, (x1, y1), (x2, y2), (60, 220, 130), 2)
@@ -438,6 +446,13 @@ def run(video, calibration=None, span=None, fov=60.0, start_s=0.0, max_frames=No
                 cv2.putText(vis, tag, org, cv2.FONT_HERSHEY_SIMPLEX, 0.55, (60, 220, 130), 1, cv2.LINE_AA)
             if ball_rec:
                 cv2.circle(vis, tuple(int(v) for v in ball_rec["eq"]), 12, (0, 215, 255), 2)
+            if lock_draw is not None:
+                lx, ly = int(lock_draw[0]), int(lock_draw[1])
+                cv2.circle(vis, (lx, ly), 12, (255, 200, 0), 2)      # cyan: locked far ball
+                cv2.putText(vis, "ball", (lx + 14, ly + 4), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.55, (0, 0, 0), 3, cv2.LINE_AA)
+                cv2.putText(vis, "ball", (lx + 14, ly + 4), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.55, (255, 200, 0), 1, cv2.LINE_AA)
             hdr = f'{fidx / fps:6.1f}s   players {len(tracks)}'
             if not (cal and cal.get("quality", {}).get("valid", False)):
                 hdr += "   (no calibration — positions unavailable)"

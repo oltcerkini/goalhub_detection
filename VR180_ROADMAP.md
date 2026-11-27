@@ -308,6 +308,17 @@ the configuration that worked). After the fixes, the goal-sequence probe startin
 Pipeline retries acquisition up to 12 times globally (5 s cooldown on failure) so a
 lost ball can be re-acquired; on the goal probe only one attempt was needed.
 
+**8. Visible output.** With `--goals` and rendering, the annotated/follow video now
+draws the lock-on far ball (cyan circle + "ball") each detected frame — so the user
+can SEE the program following it. `out/_goal_moment.py` renders a debug montage of
+the goal moment (fitted goal box green, trail dots, red current track point, GOAL
+banner). Note in the montage the fitted box matches the traced goal frame; the ball
+occlusion near the line means the current point is near the keeper at the goal
+instant (the known caveat), not a crisp ball. Also fixed a render bug: the content
+region drifts a few px per frame, so the fixed-size VideoWriter was silently DROPPING
+frames (a 150-frame render wrote only 40). Frames are now resized to the writer size
+before drawing — affects all annotated/follow videos, not just goals.
+
 **=== SESSION 2026-11-26 (cont.) — STEP 4 PROBE: ZOOM FINDS THE FAR BALL ===**
 Product constraint confirmed by the user: **no behind-goal camera** — ball/goal must
 work from the normal wide view ([[product-camera-setup]]). New module `ball_zoom.py`.
