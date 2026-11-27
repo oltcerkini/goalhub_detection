@@ -197,6 +197,17 @@ Barca trace does not calibrate yet** — the fitted pose is degenerate.
 **=== SESSION 2026-11-27 — STEP 4: GOAL ANCHOR, LOCK-ON, GOAL ENTRY ===**
 Working under the product constraint (normal wide camera, [[product-camera-setup]]).
 
+**⚠️ CORRECTION (user review, end of session):** the goal box does NOT sit on the
+real goal, and near the goal the tracker follows players — so the goal call and the
+cyan ball marker there are NOT trustworthy. **Retract the "one correct goal" below.**
+Evidence: (a) on its own traced frame, `goal_right` sits ~5–10 px above the actual
+crossbar, and the fitted box inherits it; (b) the CLI test renders did not pin the
+frame crop, so region drift shifted the box further; (c) frames 1285–1287 are a
+player scrum — the track is on a person (75 px off the 1287 label). Open-play ball
+tracking is genuinely good; the goal-specific parts are NOT. Fix order: one pinned
+pixel space + goal-box self-check against the real white goal (refuse if misaligned),
+then ball identity through the crowd or an honest "ball lost".
+
 **1. Calibration anchors the painted goal frames (biggest accuracy win).**
 The user trace `calib/calib_equirect.json` contains `goal_left`/`goal_right`
 (posts+crossbar, 68 pts each = 136 pts) that `calibration_from_traces` used to

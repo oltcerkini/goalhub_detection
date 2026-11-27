@@ -17,12 +17,12 @@ Upload a 180° match video → the app finds **players + ball** → positions/di
 
 ## Current step
 
-**RESUME HERE (say "continue"):** saved 2026-11-27. **Steps 1 ✅, 2 ✅, 3 ✅ done.
-Step 4 prototyped end-to-end.** The far ball is found in 9/9 hand-marked frames when
-the program zooms; **lock-on now acquires the right moving spot on its own** and
-follows it at 0–2 px on 5 of the 6 goal-sequence checkpoints (same as when seeded by
-hand). The **goal rule fires once** at the correct goal in your Barca clip. Nothing
-is blocked on you.
+**RESUME HERE (say "continue"):** saved 2026-11-27. **Steps 1–3 ✅ done. Step 4 is
+NOT done.** Open-play ball tracking is solid, but your review showed the two
+goal-critical parts are wrong: **the goal box does not sit on the real goal**, and
+near the goal **the tracker follows players**, so the "ball" marker and the goal call
+there are **not trustworthy**. I have retracted the earlier "one correct goal" claim.
+Fix is in progress; I may need a goal re-trace from you if the auto-align can't do it.
 
 **What I built this session (all measured):**
 - **Calibration now anchors the painted goal frames.** Your trace already contained
@@ -39,24 +39,25 @@ is blocked on you.
   Synthetic checks all behave: wide shot, over the bar, keeper standing still,
   keeper shuffling, ball crossing far in front → **no goal**; a normal roll-in → one.
 
-**Honest caveat:** the ball is briefly occluded by players/keeper exactly as it
-crosses, so at the goal instant the tracker latches onto a high-confidence object
-near the goal (the trail is ~65 px off the hand label at 1287). The event is still
-right here because the ball approached fast and the goal area was entered — but the
-ball's identity *inside the net* is not verified. That is the next thing to harden
-(re-acquire + motion-into-goal evidence), not a calibration problem.
+**Correction after your review (2026-11-27):** the goal box is **NOT on the real
+goal**. Your traced goal frame sits a few pixels above the actual crossbar, and my
+test renders did not lock the frame crop, which shifted it further. More importantly,
+as the ball enters the crowd at the goal the tracker switches onto players/keeper —
+so the cyan "ball" you saw there is often a person, and the goal call is unreliable.
+The earlier "one correct goal" is **NOT proven**; treat goal detection as **not
+working yet**.
 
 - **Wired into the pipeline** as an optional stage: `vr180_pipeline.py --goals`
-  emits `goal_events` (plus the lock-on trail). Verified end-to-end on the clip:
-  acquired the ball itself at 1283.4 s and reported **one left-goal event** at the
-  crossing (approach ~300 px/s). Off by default, so existing behaviour is unchanged.
+  emits `goal_events` (plus the lock-on trail). It runs end-to-end, but any event it
+  emits is only as trustworthy as the goal box and ball identity — which are wrong
+  right now (see correction). Off by default, so existing behaviour is unchanged.
 - **False-positive pass + acquisition hardening:** on ordinary stretches of the full
   match (no goal) the ball is now acquired and followed for **97 % of frames with
   zero goals fired**. This pass also caught a real weakness — the auto-find sometimes
   locked a linesman/foot instead of the ball — so acquisition now only considers
-  confident objects well inside the pitch. After the fix the goal clip still gives its
-  one correct goal. (No ground truth for the ordinary stretches, so this is
-  encouraging, not proof.)
+  confident objects well inside the pitch. Open-play acquisition/following is solid;
+  the goal clip's event is not trusted (see correction). (No ground truth for the
+  ordinary stretches, so even the open-play result is encouraging, not proof.)
 - **App wiring:** `app180` auto-enables `--goals` only when the calibration is
   v2-valid **and** the trace includes the goal frames, and the results panel shows
   "Goals: N — …". Existing saved calibrations are v1, so **recalibrate in the app**
@@ -64,13 +65,16 @@ ball's identity *inside the net* is not verified. That is the next thing to hard
   the goal path through the UI without uploading the full video.)
 
 **Next, in order:**
-1. **False-positive pass**: run `--goals` on the other clips / non-goal stretches
-   and make sure nothing spurious fires (needs a valid calibration with goal frames
-   for at least one more clip).
-2. **Re-acquire after loss** in the dense loop (currently the tracker can sit on a
-   static object near the goal once the real ball is occluded), and surface goal
-   events in the app UI.
-3. Then step 5 (stats) — goals are the last detection piece.
+1. **Make the goal box land on the real goal.** Calibrate and render in ONE locked
+   pixel space (no crop drift), then self-check the goal box against the actual white
+   goal in the image. If it can't be aligned, the program must **refuse to emit goals**
+   (never call a wrong one). May require re-tracing the goal mouth — will know after
+   this step.
+2. **Stop the misleading ball marker near the goal.** Keep identity through the goal
+   crowd, or show "ball lost" instead of drawing a player as the ball.
+3. **Re-render your clip and show corrected pictures.** Only claim the goal part works
+   once the box sits on the goal and the marker sits on the ball.
+4. Then step 5 (stats).
 
 ✅ **Step 1 done** — virtual follow-camera + MP4 built and verified (clean perspective
 view that pans to the action; new video in the app).
@@ -109,7 +113,7 @@ pitch on your frame — if they sit on the painted lines, it's good. No action f
 | 1 | **Virtual follow-camera + MP4** — smooth camera that follows the action; render a clean MP4 | me | ✅ **Done** |
 | 2 | **Run the pipeline on all your clips** (night, stereo, portrait, wide) and fix the cheap failures | me | ✅ **Done** |
 | 3 | **Make calibration easier + more accurate** | me + your camera specs | ✅ **Done** — your specs are optional now; the spans are solved from the pitch |
-| 4 | **Ball near goals / goal detection** — must work from the normal match camera (not behind-goal) | me | **in progress** — auto lock-on + goal entry rule prototyped: 5/6 checkpoints at 0–2 px, one correct goal event; next: integrate + false-positive pass |
+| 4 | **Ball near goals / goal detection** — must work from the normal match camera (not behind-goal) | me | **NOT working at the goal** (user review) — goal box off the real goal + tracker follows players in the crowd; open-play ball is fine. Next: fix box alignment + ball identity |
 | 5 | **Events & analytics** (possession, shots, goals, heatmaps) from metre positions | me | after 3/4 |
 
 ## The few things I actually need from you (only when listed)
